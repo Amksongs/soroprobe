@@ -731,6 +731,8 @@ func inGitHubActions() bool {
 
 func newServeCmd(opts *options) *cobra.Command {
 	var addr string
+	var tlsCert string
+	var tlsKey string
 	var inspectCacheTTL time.Duration
 	var apiToken string
 
@@ -752,6 +754,15 @@ token shorter than 16 characters is rejected at startup.`,
 			if cmd.Flags().Changed("inspect-cache-ttl") {
 				opts.cfg.InspectCacheTTL = inspectCacheTTL
 			}
+			if tlsCert != "" {
+				opts.cfg.HTTPTLSCert = tlsCert
+			}
+			if tlsKey != "" {
+				opts.cfg.HTTPTLSKey = tlsKey
+			}
+			if (opts.cfg.HTTPTLSCert == "") != (opts.cfg.HTTPTLSKey == "") {
+				return fmt.Errorf("TLS certificate and key must be configured together")
+			}
 
 			p, cleanup, err := opts.prober()
 			if err != nil {
@@ -761,18 +772,25 @@ token shorter than 16 characters is rejected at startup.`,
 
 			log := opts.cfg.Logger(os.Stderr)
 			server := api.New(api.Options{
-				Prober:            p,
-				Addr:              opts.cfg.HTTPAddr,
-				Logger:            log,
-				CORSOrigins:       opts.cfg.CORSOrigins,
-				NetworkPassphrase: opts.cfg.NetworkPassphrase,
-				APIToken:          opts.cfg.APIToken,
+				Prober:             p,
+				Addr:               opts.cfg.HTTPAddr,
+				Logger:             log,
+				CORSOrigins:        opts.cfg.CORSOrigins,
+				NetworkPassphrase:  opts.cfg.NetworkPassphrase,
+				RateLimitPerMinute: opts.cfg.HTTPRateLimitPerMinute,
+				RateLimitBurst:     opts.cfg.HTTPRateLimitBurst,
+				TrustForwardedFor:  opts.cfg.HTTPTrustForwardedFor,
+				TLSCert:            opts.cfg.HTTPTLSCert,
+				TLSKey:             opts.cfg.HTTPTLSKey,
+				APIToken:           opts.cfg.APIToken,
 			})
 			return server.ListenAndServe(cmd.Context())
 		},
 	}
 
 	cmd.Flags().StringVar(&addr, "addr", "", "listen address, overriding HTTP_ADDR")
+	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "TLS certificate file, overriding HTTP_TLS_CERT")
+	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "TLS key file, overriding HTTP_TLS_KEY")
 	cmd.Flags().DurationVar(&inspectCacheTTL, "inspect-cache-ttl", 0,
 		"cache inspect results for this long; 0 disables (a few seconds suits dashboards, because TTLs change once per ledger)")
 	cmd.Flags().StringVar(&apiToken, "api-token", "",

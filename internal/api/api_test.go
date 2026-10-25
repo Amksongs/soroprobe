@@ -2,11 +2,17 @@ package api_test
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +112,90 @@ func TestLivenessDoesNotTouchTheNetwork(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Empty(t, fake.EntryRequests)
 	assert.Empty(t, fake.SimulateRequests)
+}
+
+func TestRateLimitWeightsBatchesAndResets(t *testing.T) {
+	t.Parallel()
+
+	fake := stellartest.NewFake(t)
+	p, err := probe.New(probe.Options{Client: fake, SourceAccount: stellartest.SourceAccount})
+	require.NoError(t, err)
+	h := api.New(api.Options{
+		Prober:             p,
+		RateLimitPerMinute: 6_000,
+		RateLimitBurst:     1,
+	}).Handler()
+
+	first := do(t, h, http.MethodGet, "/v1/unknown", "", nil)
+	assert.Equal(t, http.StatusNotFound, first.Code)
+
+	limited := do(t, h, http.MethodPost, "/v1/checks", `{"checks":[{},{}]}`, nil)
+	assert.Equal(t, http.StatusTooManyRequests, limited.Code)
+	assert.Equal(t, "1", limited.Header().Get("Retry-After"))
+	assert.JSONEq(t, `{"error":"rate limit exceeded"}`, limited.Body.String())
+
+	health := do(t, h, http.MethodGet, "/healthz", "", nil)
+	assert.Equal(t, http.StatusOK, health.Code)
+
+	time.Sleep(30 * time.Millisecond)
+	reset := do(t, h, http.MethodPost, "/v1/checks", `{"checks":[{},{}]}`, nil)
+	assert.Equal(t, http.StatusBadRequest, reset.Code)
+}
+
+func TestListenAndServeTLS(t *testing.T) {
+	testTLS := httptest.NewTLSServer(http.NotFoundHandler())
+	defer testTLS.Close()
+
+	cert := testTLS.TLS.Certificates[0]
+	certFile := filepath.Join(t.TempDir(), "server.crt")
+	keyFile := filepath.Join(t.TempDir(), "server.key")
+	require.NoError(t, os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: cert.Certificate[0],
+	}), 0o600))
+	key, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{
+		Type: "PRIVATE KEY", Bytes: key,
+	}), 0o600))
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := listener.Addr().String()
+	require.NoError(t, listener.Close())
+
+	fake := stellartest.NewFake(t)
+	p, err := probe.New(probe.Options{Client: fake, SourceAccount: stellartest.SourceAccount})
+	require.NoError(t, err)
+	server := api.New(api.Options{Prober: p, Addr: addr, TLSCert: certFile, TLSKey: keyFile})
+	ctx, cancel := context.WithCancel(context.Background())
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.ListenAndServe(ctx) }()
+	defer func() {
+		cancel()
+		require.NoError(t, <-serveErr)
+	}()
+
+	parsedCert, err := x509.ParseCertificate(cert.Certificate[0])
+	require.NoError(t, err)
+	roots := x509.NewCertPool()
+	roots.AddCert(parsedCert)
+	client := &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{RootCAs: roots},
+	}}
+	defer client.CloseIdleConnections()
+
+	deadline := time.Now().Add(5 * time.Second)
+	var response *http.Response
+	for time.Now().Before(deadline) {
+		response, err = client.Get("https://" + addr + "/healthz")
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.NoError(t, err)
+	defer func() { _ = response.Body.Close() }()
+	assert.Equal(t, http.StatusOK, response.StatusCode)
 }
 
 func TestSimulateEndpoint(t *testing.T) {

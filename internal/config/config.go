@@ -36,8 +36,10 @@ const (
 	// quota on whoever finds it, so serving wider than the local machine is an
 	// opt-in rather than the default. The Docker image widens it, because
 	// loopback inside a container would reach nothing.
-	DefaultHTTPAddr = "127.0.0.1:8080"
-	DefaultLogLevel = "info"
+	DefaultHTTPAddr                  = "127.0.0.1:8080"
+	DefaultRateLimitPerMinute uint32 = 60
+	DefaultRateLimitBurst     uint32 = 10
+	DefaultLogLevel                  = "info"
 	// DefaultLogFormat keeps logs human-readable; json is the opt-in for CI
 	// and log aggregators, which filter on fields rather than regex.
 	DefaultLogFormat = "text"
@@ -87,6 +89,11 @@ const (
 	EnvDataWarnLedgers         = "DATA_WARN_LEDGERS"
 	EnvDataCriticalLedgers     = "DATA_CRITICAL_LEDGERS"
 	EnvProfile                 = "SOROPROBE_PROFILE"
+	EnvHTTPRateLimitPerMinute  = "HTTP_RATE_LIMIT_PER_MINUTE"
+	EnvHTTPRateLimitBurst      = "HTTP_RATE_LIMIT_BURST"
+	EnvHTTPTrustForwardedFor   = "HTTP_TRUST_FORWARDED_FOR"
+	EnvHTTPTLSCert             = "HTTP_TLS_CERT"
+	EnvHTTPTLSKey              = "HTTP_TLS_KEY"
 )
 
 // Config holds every setting SoroProbe needs.
@@ -101,7 +108,12 @@ type Config struct {
 	// HTTPAddr is the listen address for the HTTP API.
 	HTTPAddr string `json:"http_addr"`
 	// CORSOrigins is the exact-origin allow-list for the HTTP API.
-	CORSOrigins []string `json:"-"`
+	CORSOrigins            []string `json:"-"`
+	HTTPRateLimitPerMinute uint32   `json:"http_rate_limit_per_minute"`
+	HTTPRateLimitBurst     uint32   `json:"http_rate_limit_burst"`
+	HTTPTrustForwardedFor  bool     `json:"http_trust_forwarded_for"`
+	HTTPTLSCert            string   `json:"http_tls_cert"`
+	HTTPTLSKey             string   `json:"http_tls_key"`
 	// LogLevel is one of debug, info, warn, error.
 	LogLevel string `json:"log_level"`
 	// LogFormat selects the log handler: "text" for humans, "json" for log
@@ -139,36 +151,43 @@ type Config struct {
 // Default returns a Config populated entirely from the package defaults.
 func Default() Config {
 	return Config{
-		RPCURL:            DefaultRPCURL,
-		NetworkPassphrase: DefaultNetworkPassphrase,
-		SourceAccount:     DefaultSourceAccount,
-		HTTPAddr:          DefaultHTTPAddr,
-		LogLevel:          DefaultLogLevel,
-		LogFormat:         DefaultLogFormat,
-		Timeout:           DefaultTimeout,
-		WarnLedgers:       DefaultWarnLedgers,
-		CriticalLedgers:   DefaultCriticalLedgers,
-		BaseFee:           DefaultBaseFee,
+		RPCURL:                 DefaultRPCURL,
+		NetworkPassphrase:      DefaultNetworkPassphrase,
+		SourceAccount:          DefaultSourceAccount,
+		HTTPAddr:               DefaultHTTPAddr,
+		LogLevel:               DefaultLogLevel,
+		LogFormat:              DefaultLogFormat,
+		Timeout:                DefaultTimeout,
+		WarnLedgers:            DefaultWarnLedgers,
+		CriticalLedgers:        DefaultCriticalLedgers,
+		BaseFee:                DefaultBaseFee,
+		HTTPRateLimitPerMinute: DefaultRateLimitPerMinute,
+		HTTPRateLimitBurst:     DefaultRateLimitBurst,
 	}
 }
 
 // fileConfig mirrors Config but with pointers, so that "absent" is
 // distinguishable from "set to the zero value". It can also contain named profiles.
 type fileConfig struct {
-	RPCURL             *string                    `json:"rpc_url" yaml:"rpc_url"`
-	NetworkPassphrase  *string                    `json:"network_passphrase" yaml:"network_passphrase"`
-	SourceAccount      *string                    `json:"source_account" yaml:"source_account"`
-	HTTPAddr           *string                    `json:"http_addr" yaml:"http_addr"`
-	LogLevel           *string                    `json:"log_level" yaml:"log_level"`
-	LogFormat          *string                    `json:"log_format" yaml:"log_format"`
-	Timeout            *string                    `json:"timeout" yaml:"timeout"`
-	WarnLedgers        *uint32                    `json:"warn_ledgers" yaml:"warn_ledgers"`
-	CriticalLedgers    *uint32                    `json:"critical_ledgers" yaml:"critical_ledgers"`
-	ThresholdOverrides *health.ThresholdOverrides `json:"thresholds" yaml:"thresholds"`
-	SoroVaultURL       *string                    `json:"sorovault_url" yaml:"sorovault_url"`
-	BaseFee            *int64                     `json:"base_fee" yaml:"base_fee"`
-	InspectCacheTTL    *string                    `json:"inspect_cache_ttl" yaml:"inspect_cache_ttl"`
-	Profiles           map[string]*fileConfig     `json:"profiles" yaml:"profiles"`
+	RPCURL                 *string                    `json:"rpc_url" yaml:"rpc_url"`
+	NetworkPassphrase      *string                    `json:"network_passphrase" yaml:"network_passphrase"`
+	SourceAccount          *string                    `json:"source_account" yaml:"source_account"`
+	HTTPAddr               *string                    `json:"http_addr" yaml:"http_addr"`
+	LogLevel               *string                    `json:"log_level" yaml:"log_level"`
+	LogFormat              *string                    `json:"log_format" yaml:"log_format"`
+	Timeout                *string                    `json:"timeout" yaml:"timeout"`
+	WarnLedgers            *uint32                    `json:"warn_ledgers" yaml:"warn_ledgers"`
+	CriticalLedgers        *uint32                    `json:"critical_ledgers" yaml:"critical_ledgers"`
+	ThresholdOverrides     *health.ThresholdOverrides `json:"thresholds" yaml:"thresholds"`
+	SoroVaultURL           *string                    `json:"sorovault_url" yaml:"sorovault_url"`
+	BaseFee                *int64                     `json:"base_fee" yaml:"base_fee"`
+	InspectCacheTTL        *string                    `json:"inspect_cache_ttl" yaml:"inspect_cache_ttl"`
+	HTTPRateLimitPerMinute *uint32                    `json:"http_rate_limit_per_minute" yaml:"http_rate_limit_per_minute"`
+	HTTPRateLimitBurst     *uint32                    `json:"http_rate_limit_burst" yaml:"http_rate_limit_burst"`
+	HTTPTrustForwardedFor  *bool                      `json:"http_trust_forwarded_for" yaml:"http_trust_forwarded_for"`
+	HTTPTLSCert            *string                    `json:"http_tls_cert" yaml:"http_tls_cert"`
+	HTTPTLSKey             *string                    `json:"http_tls_key" yaml:"http_tls_key"`
+	Profiles               map[string]*fileConfig     `json:"profiles" yaml:"profiles"`
 	// APIToken is accepted so that a file carrying the key still loads, and
 	// is never applied: the token is a secret and comes from API_TOKEN only.
 	APIToken *string `json:"api_token" yaml:"api_token"`
@@ -259,6 +278,17 @@ func applyValues(cfg *Config, path string, fc *fileConfig) error {
 	setString(&cfg.NetworkPassphrase, fc.NetworkPassphrase)
 	setString(&cfg.SourceAccount, fc.SourceAccount)
 	setString(&cfg.HTTPAddr, fc.HTTPAddr)
+	if fc.HTTPRateLimitPerMinute != nil {
+		cfg.HTTPRateLimitPerMinute = *fc.HTTPRateLimitPerMinute
+	}
+	if fc.HTTPRateLimitBurst != nil {
+		cfg.HTTPRateLimitBurst = *fc.HTTPRateLimitBurst
+	}
+	if fc.HTTPTrustForwardedFor != nil {
+		cfg.HTTPTrustForwardedFor = *fc.HTTPTrustForwardedFor
+	}
+	setString(&cfg.HTTPTLSCert, fc.HTTPTLSCert)
+	setString(&cfg.HTTPTLSKey, fc.HTTPTLSKey)
 	setString(&cfg.LogLevel, fc.LogLevel)
 	setString(&cfg.LogFormat, fc.LogFormat)
 	setString(&cfg.SoroVaultURL, fc.SoroVaultURL)
@@ -340,6 +370,21 @@ func applyEnv(cfg *Config) error {
 	setString(&cfg.NetworkPassphrase, lookup(EnvNetworkPassphrase))
 	setString(&cfg.SourceAccount, lookup(EnvSourceAccount))
 	setString(&cfg.HTTPAddr, lookup(EnvHTTPAddr))
+	if err := setUint32FromEnv(&cfg.HTTPRateLimitPerMinute, EnvHTTPRateLimitPerMinute); err != nil {
+		return err
+	}
+	if err := setUint32FromEnv(&cfg.HTTPRateLimitBurst, EnvHTTPRateLimitBurst); err != nil {
+		return err
+	}
+	if v := lookup(EnvHTTPTrustForwardedFor); v != nil {
+		trusted, err := strconv.ParseBool(*v)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", EnvHTTPTrustForwardedFor, err)
+		}
+		cfg.HTTPTrustForwardedFor = trusted
+	}
+	setString(&cfg.HTTPTLSCert, lookup(EnvHTTPTLSCert))
+	setString(&cfg.HTTPTLSKey, lookup(EnvHTTPTLSKey))
 	if origins := lookup(EnvCORSOrigins); origins != nil {
 		cfg.CORSOrigins = nil
 		for _, origin := range strings.Split(*origins, ",") {
@@ -473,6 +518,12 @@ func setString(dst *string, src *string) {
 
 // Validate reports whether the configuration is usable.
 func (c Config) Validate() error {
+	if (c.HTTPTLSCert == "") != (c.HTTPTLSKey == "") {
+		return errors.New("HTTP TLS certificate and key must be configured together")
+	}
+	if c.HTTPRateLimitPerMinute == 0 || c.HTTPRateLimitBurst == 0 {
+		return errors.New("HTTP rate limit and burst must be positive")
+	}
 	if c.RPCURL == "" {
 		return errors.New("rpc url is required")
 	}

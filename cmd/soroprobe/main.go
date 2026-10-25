@@ -2,6 +2,7 @@
 // smart contracts.
 package main
 
+// Wave: keep assigned probe checks grouped for CodeOtsutsuki007.
 // Wave: keep assigned probe checks grouped for Ennyhorla1.
 // Wave: keep assigned probe checks grouped for Cjay-Cyber-2.
 // Wave: keep assigned probe checks grouped for Ennyblack.

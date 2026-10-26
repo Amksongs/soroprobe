@@ -19,11 +19,15 @@ on:
         type: boolean
         default: true
 
+# .github/scripts/automerge.sh needs write on the PR itself, the issues it
+# closes and the labels/comments it leaves, plus the ability to re-run CI.
 permissions:
   contents: write
   pull-requests: write
   issues: write
+  # Reading check results to decide whether a PR may merge.
   checks: read
+  # Re-running CI on main after a merge (GITHUB_TOKEN pushes do not trigger it).
   actions: write
 
 # One merge at a time: each merge moves main and invalidates other PRs' checks.

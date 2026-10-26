@@ -18,24 +18,58 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/clients/rpcclient"
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/soroworks/soroprobe/internal/scval"
 	"github.com/soroworks/soroprobe/internal/stellar"
 )
 
+type stringSlice []string
+
+func (s *stringSlice) String() string {
+	return strings.Join(*s, ", ")
+}
+
+func (s *stringSlice) Set(val string) error {
+	*s = append(*s, val)
+	return nil
+}
+
 func main() {
 	rpcURL := flag.String("rpc-url", "https://soroban-testnet.stellar.org", "Stellar RPC endpoint")
-	outDir := flag.String("out", "internal/stellar/stellartest/testdata", "directory to write fixtures into")
+	out := flag.String("out", "", "output directory (default internal/stellar/stellartest/testdata) or output file when recording a single fixture")
 	sac := flag.String("sac", "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC", "a Stellar Asset Contract to record")
 	wasm := flag.String("wasm", "CCLV77FYLRJMBGTILTKVIM76SI6JY56H7KTT47HE26UF4F265UYRDSR4", "a Wasm contract to record")
 	undeployed := flag.String("undeployed", "CCV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XK5LVOV2XMCW", "a valid but undeployed contract address")
 	source := flag.String("source", "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF", "source account for simulation")
+
+	contract := flag.String("contract", "", "contract ID for recording a custom fixture")
+	fn := flag.String("fn", "", "function to simulate for a custom fixture")
+	var args stringSlice
+	flag.Var(&args, "arg", "argument for --fn in type:value form (repeatable)")
+	var keys stringSlice
+	flag.Var(&keys, "key", "contract data key to record in type:value form (repeatable)")
 	flag.Parse()
 
-	if err := run(*rpcURL, *outDir, *sac, *wasm, *undeployed, *source); err != nil {
+	if *contract != "" {
+		if err := recordCustom(*rpcURL, *out, *source, *contract, *fn, args, keys); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	outDir := *out
+	if outDir == "" {
+		outDir = "internal/stellar/stellartest/testdata"
+	}
+
+	if err := run(*rpcURL, outDir, *sac, *wasm, *undeployed, *source); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -178,7 +212,7 @@ func codeEntry(ctx context.Context, c *rpcclient.Client, contractID string) (pro
 	return c.GetLedgerEntries(ctx, protocol.GetLedgerEntriesRequest{Keys: []string{key}})
 }
 
-func simulate(ctx context.Context, c *rpcclient.Client, source, contractID, fn string) (protocol.SimulateTransactionResponse, error) {
+func simulate(ctx context.Context, c *rpcclient.Client, source, contractID, fn string, args ...xdr.ScVal) (protocol.SimulateTransactionResponse, error) {
 	addr, err := stellar.ParseContractID(contractID)
 	if err != nil {
 		return protocol.SimulateTransactionResponse{}, err
@@ -187,11 +221,88 @@ func simulate(ctx context.Context, c *rpcclient.Client, source, contractID, fn s
 		SourceAccount: source,
 		Contract:      addr,
 		Function:      fn,
+		Args:          args,
 	})
 	if err != nil {
 		return protocol.SimulateTransactionResponse{}, err
 	}
 	return c.SimulateTransaction(ctx, protocol.SimulateTransactionRequest{Transaction: envelope})
+}
+
+func recordCustom(rpcURL, outPath, source, contractID, fn string, argSpecs, keySpecs []string) error {
+	ctx := context.Background()
+	client := rpcclient.NewClient(rpcURL, &http.Client{Timeout: 30 * time.Second})
+	defer func() { _ = client.Close() }()
+
+	addr, err := stellar.ParseContractID(contractID)
+	if err != nil {
+		return fmt.Errorf("parse contract id %s: %w", contractID, err)
+	}
+
+	codec := scval.NewRegistry()
+
+	// If --fn is specified, record a simulation fixture.
+	if fn != "" {
+		encodedArgs := make([]xdr.ScVal, 0, len(argSpecs))
+		for _, argSpec := range argSpecs {
+			val, err := codec.Encode(argSpec)
+			if err != nil {
+				return fmt.Errorf("encode arg %q: %w", argSpec, err)
+			}
+			encodedArgs = append(encodedArgs, val)
+		}
+
+		resp, err := simulate(ctx, client, source, contractID, fn, encodedArgs...)
+		if err != nil {
+			return fmt.Errorf("simulate %s:%s: %w", contractID, fn, err)
+		}
+
+		dest := outPath
+		if dest == "" {
+			dest = fmt.Sprintf("simulate_%s.json", fn)
+		}
+		if err := writeToFile(dest, resp); err != nil {
+			return err
+		}
+		fmt.Printf("recorded simulation to %s (error=%q)\n", dest, truncate(resp.Error, 40))
+		return nil
+	}
+
+	// Otherwise, record ledger entries (instance, code if wasm, and any specified data keys).
+	var encodedKeys []string
+	instKey, err := stellar.EncodeKey(stellar.InstanceKey(addr))
+	if err != nil {
+		return err
+	}
+	encodedKeys = append(encodedKeys, instKey)
+
+	for _, kSpec := range keySpecs {
+		val, err := codec.Encode(kSpec)
+		if err != nil {
+			return fmt.Errorf("encode data key %q: %w", kSpec, err)
+		}
+		// Record persistent data key by default.
+		dk, err := stellar.EncodeKey(stellar.DataKey(addr, val, xdr.ContractDataDurabilityPersistent))
+		if err != nil {
+			return err
+		}
+		encodedKeys = append(encodedKeys, dk)
+	}
+
+	resp, err := client.GetLedgerEntries(ctx, protocol.GetLedgerEntriesRequest{Keys: encodedKeys})
+	if err != nil {
+		return fmt.Errorf("getLedgerEntries: %w", err)
+	}
+
+	dest := outPath
+	if dest == "" {
+		dest = fmt.Sprintf("ledger_entries_%s.json", contractID[:8])
+	}
+	if err := writeToFile(dest, resp); err != nil {
+		return err
+	}
+	fmt.Printf("recorded %d ledger entries to %s\n", len(resp.Entries), dest)
+	return nil
 }
 
 // simulateExtend records the cost of extending a contract's instance entry,
@@ -219,12 +330,21 @@ func simulateExtend(ctx context.Context, c *rpcclient.Client, source, contractID
 }
 
 func write(dir, name string, v any) error {
+	return writeToFile(filepath.Join(dir, name), v)
+}
+
+func writeToFile(path string, v any) error {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return err
+		}
+	}
 	raw, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal %s: %w", name, err)
+		return fmt.Errorf("marshal %s: %w", path, err)
 	}
 	raw = append(raw, '\n')
-	return os.WriteFile(filepath.Join(dir, name), raw, 0o600)
+	return os.WriteFile(path, raw, 0o600)
 }
 
 func truncate(s string, n int) string {

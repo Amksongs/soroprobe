@@ -82,7 +82,7 @@ func addFixtureReturnValues(f *testing.F) {
 
 	added := 0
 	for _, path := range paths {
-		raw, err := os.ReadFile(path)
+		raw, err := os.ReadFile(path) //nolint:gosec // path comes from filepath.Glob over the fixed fixture directory
 		require.NoError(f, err)
 
 		var response struct {

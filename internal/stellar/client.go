@@ -32,6 +32,8 @@ type Client interface {
 	GetLedgerEntries(ctx context.Context, req protocol.GetLedgerEntriesRequest) (protocol.GetLedgerEntriesResponse, error)
 	// GetLatestLedger reports the most recently closed ledger.
 	GetLatestLedger(ctx context.Context) (protocol.GetLatestLedgerResponse, error)
+	// GetLedgers reports close times for a sequence range.
+	GetLedgers(ctx context.Context, req protocol.GetLedgersRequest) (protocol.GetLedgersResponse, error)
 	// GetNetwork reports the passphrase and protocol version of the network.
 	GetNetwork(ctx context.Context) (protocol.GetNetworkResponse, error)
 	// GetHealth reports RPC server health and its retention window.
@@ -133,6 +135,18 @@ func (c *RPCClient) GetLatestLedger(ctx context.Context) (protocol.GetLatestLedg
 	resp, err := c.inner.GetLatestLedger(ctx)
 	if err != nil {
 		return resp, fmt.Errorf("getLatestLedger: %w", err)
+	}
+	return resp, nil
+}
+
+// GetLedgers implements Client.
+func (c *RPCClient) GetLedgers(ctx context.Context, req protocol.GetLedgersRequest) (protocol.GetLedgersResponse, error) {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+
+	resp, err := c.inner.GetLedgers(ctx, req)
+	if err != nil {
+		return resp, fmt.Errorf("getLedgers: %w", err)
 	}
 	return resp, nil
 }

@@ -23,6 +23,9 @@ import (
 // unregistered contract is still a contract worth probing.
 var ErrUnknownContract = errors.New("abi: contract is not in the interface registry")
 
+// ErrNoWasm reports that a contract has no Wasm interface to decode.
+var ErrNoWasm = errors.New("abi: contract has no wasm interface")
+
 // ErrNoSuchFunction reports that the contract's interface does not export the
 // requested function. Unlike ErrUnknownContract this is a definite answer: a
 // simulation could only fail.

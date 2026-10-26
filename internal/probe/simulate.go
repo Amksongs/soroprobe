@@ -255,8 +255,39 @@ type SimulateResult struct {
 	// Events are decoded diagnostic events from the simulation.
 	Events []Event `json:"events,omitempty"`
 
+	// Auth lists the authorization entries the call requires.
+	Auth []AuthEntry `json:"auth,omitempty"`
+
 	// LatestLedger is the ledger the simulation ran against.
 	LatestLedger uint32 `json:"latest_ledger"`
+}
+
+// AuthorizedInvocation is a node in an authorized invocation tree.
+type AuthorizedInvocation struct {
+	ContractID     string                 `json:"contract_id,omitempty"`
+	Function       string                 `json:"function,omitempty"`
+	Args           []any                  `json:"args,omitempty"`
+	SubInvocations []AuthorizedInvocation `json:"sub_invocations,omitempty"`
+}
+
+// AuthEntry represents an authorization required by an invocation.
+type AuthEntry struct {
+	Address         string                `json:"address,omitempty"`
+	IsSourceAccount bool                  `json:"is_source_account"`
+	RootInvocation  *AuthorizedInvocation `json:"root_invocation,omitempty"`
+	RawXDR          string                `json:"raw_xdr,omitempty"`
+}
+
+// DefaultBaseFee is the network minimum base fee for a single transaction operation (100 stroops).
+const DefaultBaseFee int64 = 100
+
+// EstimateTotalFee calculates the estimated total fee for a simulated call:
+// resource fee plus the base inclusion fee (base fee × 1 operation).
+func EstimateTotalFee(resourceFee, baseFee int64) int64 {
+	if baseFee <= 0 {
+		baseFee = DefaultBaseFee
+	}
+	return resourceFee + baseFee
 }
 
 // Simulate builds an invocation, simulates it, and reports the decoded result
@@ -414,6 +445,8 @@ func (p *Prober) typeArgs(ctx context.Context, req SimulateRequest) (typedArgs, 
 		}
 		if errors.Is(err, abi.ErrUnknownContract) {
 			out.note = "contract not found in the interface registry; argument types were inferred"
+		} else if errors.Is(err, abi.ErrNoWasm) {
+			out.note = "stellar asset contract has no WASM interface; argument types were inferred"
 		} else {
 			out.note = "interface registry unavailable; argument types were inferred: " + err.Error()
 		}
@@ -458,6 +491,13 @@ func (p *Prober) buildSimulateResult(req SimulateRequest, resp protocol.Simulate
 			MinResourceFee:     resp.RestorePreamble.MinResourceFee,
 			TransactionDataXDR: resp.RestorePreamble.TransactionDataXDR,
 		}
+		var data xdr.SorobanTransactionData
+		if err := xdr.SafeUnmarshalBase64(resp.RestorePreamble.TransactionDataXDR, &data); err != nil {
+			return nil, fmt.Errorf("decode restore transaction data: %w", err)
+		}
+		for _, key := range data.Resources.Footprint.ReadWrite {
+			result.RestoreRequired.ArchivedEntries = append(result.RestoreRequired.ArchivedEntries, describeLedgerKey(key))
+		}
 	}
 
 	if resp.TransactionDataXDR != "" {
@@ -487,6 +527,12 @@ func (p *Prober) buildSimulateResult(req SimulateRequest, resp protocol.Simulate
 		result.ReturnValue = decoded
 	}
 
+	if len(resp.Results) > 0 && resp.Results[0].AuthXDR != nil && len(*resp.Results[0].AuthXDR) > 0 {
+		result.Auth = p.decodeAuthEntries(*resp.Results[0].AuthXDR)
+	}
+
+	result.Cost.EstimatedTotalFee = EstimateTotalFee(result.Cost.ResourceFee, p.baseFee)
+
 	events, err := p.decodeEvents(resp.EventsXDR)
 	if err != nil {
 		// Diagnostic events are advisory. Losing them must not mask an
@@ -497,6 +543,95 @@ func (p *Prober) buildSimulateResult(req SimulateRequest, resp protocol.Simulate
 	}
 
 	return result, nil
+}
+
+func (p *Prober) decodeAuthEntries(raw []string) []AuthEntry {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]AuthEntry, 0, len(raw))
+	for _, b64 := range raw {
+		var entry xdr.SorobanAuthorizationEntry
+		if err := xdr.SafeUnmarshalBase64(b64, &entry); err != nil {
+			out = append(out, AuthEntry{RawXDR: b64})
+			continue
+		}
+
+		ae := AuthEntry{}
+		switch entry.Credentials.Type {
+		case xdr.SorobanCredentialsTypeSorobanCredentialsSourceAccount:
+			ae.Address = p.source
+			ae.IsSourceAccount = true
+		case xdr.SorobanCredentialsTypeSorobanCredentialsAddress:
+			if entry.Credentials.Address != nil {
+				if s, err := entry.Credentials.Address.Address.String(); err == nil {
+					ae.Address = s
+				}
+			}
+			ae.IsSourceAccount = (ae.Address != "" && ae.Address == p.source)
+		case xdr.SorobanCredentialsTypeSorobanCredentialsAddressV2:
+			if entry.Credentials.AddressV2 != nil {
+				if s, err := entry.Credentials.AddressV2.Address.String(); err == nil {
+					ae.Address = s
+				}
+			}
+			ae.IsSourceAccount = (ae.Address != "" && ae.Address == p.source)
+		case xdr.SorobanCredentialsTypeSorobanCredentialsAddressWithDelegates:
+			if entry.Credentials.AddressWithDelegates != nil {
+				if s, err := entry.Credentials.AddressWithDelegates.AddressCredentials.Address.String(); err == nil {
+					ae.Address = s
+				}
+			}
+			ae.IsSourceAccount = (ae.Address != "" && ae.Address == p.source)
+		default:
+			ae.IsSourceAccount = false
+		}
+
+		inv, err := p.decodeAuthorizedInvocation(entry.RootInvocation)
+		if err != nil {
+			out = append(out, AuthEntry{RawXDR: b64})
+			continue
+		}
+		ae.RootInvocation = &inv
+		out = append(out, ae)
+	}
+	return out
+}
+
+func (p *Prober) decodeAuthorizedInvocation(inv xdr.SorobanAuthorizedInvocation) (AuthorizedInvocation, error) {
+	out := AuthorizedInvocation{}
+	switch inv.Function.Type {
+	case xdr.SorobanAuthorizedFunctionTypeSorobanAuthorizedFunctionTypeContractFn:
+		fn := inv.Function.ContractFn
+		if fn != nil {
+			if s, err := fn.ContractAddress.String(); err == nil {
+				out.ContractID = s
+			}
+			out.Function = string(fn.FunctionName)
+			for _, arg := range fn.Args {
+				decoded, err := p.codec.Decode(arg)
+				if err != nil {
+					return out, err
+				}
+				out.Args = append(out.Args, decoded)
+			}
+		}
+	case xdr.SorobanAuthorizedFunctionTypeSorobanAuthorizedFunctionTypeCreateContractHostFn:
+		out.Function = "create_contract"
+	case xdr.SorobanAuthorizedFunctionTypeSorobanAuthorizedFunctionTypeCreateContractV2HostFn:
+		out.Function = "create_contract_v2"
+	default:
+		return out, fmt.Errorf("unknown authorized function type: %v", inv.Function.Type)
+	}
+
+	for _, sub := range inv.SubInvocations {
+		subInv, err := p.decodeAuthorizedInvocation(sub)
+		if err != nil {
+			return out, err
+		}
+		out.SubInvocations = append(out.SubInvocations, subInv)
+	}
+	return out, nil
 }
 
 func (p *Prober) decodeEvents(raw []string) ([]Event, error) {

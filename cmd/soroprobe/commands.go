@@ -16,6 +16,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/soroworks/soroprobe/internal/api"
+	"github.com/soroworks/soroprobe/internal/config"
 	"github.com/soroworks/soroprobe/internal/health"
 	"github.com/soroworks/soroprobe/internal/probe"
 )
@@ -270,6 +271,7 @@ func newInspectCmd(opts *options) *cobra.Command {
 	var keyFile string
 	var durability string
 	var reportPath string
+	var format string
 	var estimateExtend uint32
 
 	cmd := &cobra.Command{
@@ -296,6 +298,11 @@ has already expired — says so instead of quoting a price.
 ` + argHelp,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			outputFormat, err := selectOutputFormat(cmd, opts, format)
+			if err != nil {
+				return err
+			}
+
 			d, err := parseDurability(durability)
 			if err != nil {
 				return err
@@ -332,16 +339,21 @@ has already expired — says so instead of quoting a price.
 				return err
 			}
 
-			if opts.jsonOut {
+			switch outputFormat {
+			case "json":
 				return writeJSON(cmd.OutOrStdout(), result)
+			case "markdown":
+				return renderMarkdownInspect(cmd.OutOrStdout(), result)
+			default:
+				return renderInspect(cmd.OutOrStdout(), result)
 			}
-			return renderInspect(cmd.OutOrStdout(), result)
 		},
 	}
 
 	cmd.Flags().StringArrayVar(&dataKeys, "key", nil, "a contract data key to inspect, in type:value form (repeatable)")
 	cmd.Flags().StringVar(&keyFile, "key-file", "", "a file listing data keys to inspect, one spec per line (blank lines and # comments ignored)")
 	cmd.Flags().StringVar(&durability, "durability", "persistent", "durability for --key lookups: persistent or temporary")
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text, json or markdown")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write the JSON result to this file while printing text as usual")
 	cmd.Flags().Uint32Var(&estimateExtend, "estimate-extend", 0,
 		"also price extending each reported entry's TTL by this many ledgers")
@@ -351,6 +363,7 @@ has already expired — says so instead of quoting a price.
 func newCheckCmd(opts *options) *cobra.Command {
 	var function string
 	var callArgs []string
+	var expect string
 	var dataKeys []string
 	var keyFile string
 	var durability string
@@ -358,6 +371,7 @@ func newCheckCmd(opts *options) *cobra.Command {
 	var checkTimeout time.Duration
 	var concurrency int
 	var reportPath string
+	var format string
 	var quiet bool
 
 	cmd := &cobra.Command{
@@ -422,6 +436,10 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 			if err := checkQuietConflicts(quiet, opts.jsonOut, reportPath); err != nil {
 				return err
 			}
+			outputFormat, err := selectOutputFormat(cmd, opts, format)
+			if err != nil {
+				return err
+			}
 
 			report, err := openReport(reportPath)
 			if err != nil {
@@ -430,7 +448,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 			defer func() { err = errors.Join(err, report.close()) }()
 
 			if file != "" {
-				return runCheckFile(cmd, opts, file, checkTimeout, concurrency, report, quiet)
+				return runCheckFile(cmd, opts, file, checkTimeout, concurrency, report, quiet, outputFormat)
 			}
 
 			d, err := parseDurability(durability)
@@ -453,6 +471,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 				ContractID:     args[0],
 				Function:       function,
 				Args:           callArgs,
+				Expect:         expect,
 				DataKeys:       keys,
 				DataDurability: d,
 			})
@@ -466,7 +485,7 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 				return err
 			}
 
-			if err := emitSingleCheckOutput(cmd, opts, result, quiet); err != nil {
+			if err := emitSingleCheckOutput(cmd, result, quiet, outputFormat); err != nil {
 				return err
 			}
 
@@ -479,12 +498,14 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 
 	cmd.Flags().StringVar(&function, "fn", "", "read-only function to simulate as a liveness probe")
 	cmd.Flags().StringArrayVar(&callArgs, "arg", nil, "argument for --fn, in type:value form (repeatable)")
+	cmd.Flags().StringVar(&expect, "expect", "", "expected return value specification for --fn, in type:value form")
 	cmd.Flags().StringArrayVar(&dataKeys, "key", nil, "a contract data key to include in the TTL check (repeatable)")
 	cmd.Flags().StringVar(&keyFile, "key-file", "", "a file listing data keys for the TTL check, one spec per line (blank lines and # comments ignored)")
 	cmd.Flags().StringVar(&durability, "durability", "persistent", "durability for --key lookups: persistent or temporary")
 	cmd.Flags().StringVarP(&file, "file", "f", "", `run every check listed in this JSON file ("-" for stdin)`)
 	cmd.Flags().DurationVar(&checkTimeout, "check-timeout", 0,
 		`default time limit for each check in --file; a per-entry "timeout" wins (0 means no limit)`)
+	cmd.Flags().StringVar(&format, "format", "text", "output format: text, json or markdown")
 	cmd.Flags().IntVar(&concurrency, "concurrency", 1, "maximum number of --file checks to run at once")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
 		"print no report; the exit code is the whole answer (errors still reach stderr)")
@@ -492,8 +513,20 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 	return cmd
 }
 
+func selectOutputFormat(cmd *cobra.Command, opts *options, format string) (string, error) {
+	if opts.jsonOut && !cmd.Flags().Changed("format") {
+		return "json", nil
+	}
+	switch format {
+	case "text", "json", "markdown":
+		return format, nil
+	default:
+		return "", fmt.Errorf("unsupported output format %q (want text, json or markdown)", format)
+	}
+}
+
 // runCheckFile runs a batch of checks read from path.
-func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout time.Duration, concurrency int, report *reportFile, quiet bool) error {
+func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout time.Duration, concurrency int, report *reportFile, quiet bool, format string) error {
 	req, err := readBatch(cmd.InOrStdin(), path)
 	if err != nil {
 		return err
@@ -520,9 +553,12 @@ func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout t
 
 	out := cmd.OutOrStdout()
 	if !quiet {
-		if opts.jsonOut {
+		switch format {
+		case "json":
 			err = writeJSON(out, result)
-		} else {
+		case "markdown":
+			err = renderMarkdownBatch(out, result)
+		default:
 			err = renderBatch(out, result)
 		}
 		if err != nil {
@@ -530,8 +566,9 @@ func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout t
 		}
 
 		// Annotations go to stdout, the stream a step's log reads. They stay
-		// off under --json, whose consumer parses the document.
-		if !opts.jsonOut {
+		// off for JSON and Markdown, whose consumers parse or render the
+		// document.
+		if format == "text" {
 			emitBatchAnnotations(out, result, inGitHubActions())
 		}
 	}
@@ -551,17 +588,21 @@ func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout t
 // unless --quiet asked for none. Annotations are only emitted when a text
 // report was printed: --json consumers parse the document, and --quiet asked
 // for silence.
-func emitSingleCheckOutput(cmd *cobra.Command, opts *options, result *probe.CheckResult, quiet bool) error {
+func emitSingleCheckOutput(cmd *cobra.Command, result *probe.CheckResult, quiet bool, format string) error {
 	if quiet {
 		return nil
 	}
 	out := cmd.OutOrStdout()
-	if opts.jsonOut {
+	switch format {
+	case "json":
 		return writeJSON(out, result)
+	case "markdown":
+		return renderMarkdownCheck(out, result)
 	}
 	if err := renderCheck(out, result); err != nil {
 		return err
 	}
+	// Annotations go to stdout, the stream a step's log reads.
 	emitCheckAnnotations(out, result, inGitHubActions())
 	return nil
 }
@@ -690,16 +731,37 @@ func inGitHubActions() bool {
 
 func newServeCmd(opts *options) *cobra.Command {
 	var addr string
+	var tlsCert string
+	var tlsKey string
+	var inspectCacheTTL time.Duration
+	var apiToken string
 
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the HTTP API",
 		Long: `Serve the HTTP API, which mirrors the CLI for use from CI systems and other
-services. The API is read-only, exactly like the CLI.`,
+services. The API is read-only, exactly like the CLI.
+
+The API is unauthenticated by default, which is fine on a private network. Set
+API_TOKEN (or --api-token) to require "Authorization: Bearer <token>" on every
+/v1 route; /healthz stays open so a liveness probe needs no credential. A
+token shorter than 16 characters is rejected at startup.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if addr != "" {
 				opts.cfg.HTTPAddr = addr
+			}
+			if cmd.Flags().Changed("inspect-cache-ttl") {
+				opts.cfg.InspectCacheTTL = inspectCacheTTL
+			}
+			if tlsCert != "" {
+				opts.cfg.HTTPTLSCert = tlsCert
+			}
+			if tlsKey != "" {
+				opts.cfg.HTTPTLSKey = tlsKey
+			}
+			if (opts.cfg.HTTPTLSCert == "") != (opts.cfg.HTTPTLSKey == "") {
+				return fmt.Errorf("TLS certificate and key must be configured together")
 			}
 
 			p, cleanup, err := opts.prober()
@@ -710,17 +772,29 @@ services. The API is read-only, exactly like the CLI.`,
 
 			log := opts.cfg.Logger(os.Stderr)
 			server := api.New(api.Options{
-				Prober:            p,
-				Addr:              opts.cfg.HTTPAddr,
-				Logger:            log,
-				CORSOrigins:       opts.cfg.CORSOrigins,
-				NetworkPassphrase: opts.cfg.NetworkPassphrase,
+				Prober:             p,
+				Addr:               opts.cfg.HTTPAddr,
+				Logger:             log,
+				CORSOrigins:        opts.cfg.CORSOrigins,
+				NetworkPassphrase:  opts.cfg.NetworkPassphrase,
+				RateLimitPerMinute: opts.cfg.HTTPRateLimitPerMinute,
+				RateLimitBurst:     opts.cfg.HTTPRateLimitBurst,
+				TrustForwardedFor:  opts.cfg.HTTPTrustForwardedFor,
+				TLSCert:            opts.cfg.HTTPTLSCert,
+				TLSKey:             opts.cfg.HTTPTLSKey,
+				APIToken:           opts.cfg.APIToken,
 			})
 			return server.ListenAndServe(cmd.Context())
 		},
 	}
 
 	cmd.Flags().StringVar(&addr, "addr", "", "listen address, overriding HTTP_ADDR")
+	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "TLS certificate file, overriding HTTP_TLS_CERT")
+	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "TLS key file, overriding HTTP_TLS_KEY")
+	cmd.Flags().DurationVar(&inspectCacheTTL, "inspect-cache-ttl", 0,
+		"cache inspect results for this long; 0 disables (a few seconds suits dashboards, because TTLs change once per ledger)")
+	cmd.Flags().StringVar(&apiToken, "api-token", "",
+		fmt.Sprintf("require this bearer token on /v1 routes, overriding %s", config.EnvAPIToken))
 	return cmd
 }
 

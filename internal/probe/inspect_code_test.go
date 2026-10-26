@@ -148,7 +148,8 @@ func TestInspectCodeEntryWithoutTTLIsUnknown(t *testing.T) {
 	assert.True(t, result.Code.Present)
 	assert.Nil(t, result.Code.LiveUntilLedger)
 	assert.Equal(t, health.StatusUnknown, result.Code.Status)
-	assert.Equal(t, "present, but no TTL was reported", result.Code.Summary)
+	// The summary also states the thresholds it was judged against.
+	assert.Contains(t, result.Code.Summary, "present, but no TTL was reported")
 	assert.Equal(t, health.StatusUnknown, result.Status)
 	assert.Len(t, fake.EntryRequests, 2)
 }

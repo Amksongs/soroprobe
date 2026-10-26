@@ -6,6 +6,8 @@ coverage.html
 # Local configuration
 .env
 soroprobe.json
+soroprobe.yaml
+soroprobe.yml
 
 # Editor and OS noise
 .idea/

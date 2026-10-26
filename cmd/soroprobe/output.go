@@ -144,6 +144,25 @@ func renderSimulate(w io.Writer, r *probe.SimulateResult) error {
 	bw.printf("  write bytes        %d\n", r.Cost.WriteBytes)
 	bw.printf("  resource fee       %s\n", stroops(r.Cost.ResourceFee))
 	bw.printf("  min resource fee   %s\n", stroops(r.Cost.MinResourceFee))
+	bw.printf("  estimated total fee %s\n", stroops(r.Cost.EstimatedTotalFee))
+
+	if len(r.Auth) > 0 {
+		bw.printf("\n%s\n", s.bold("authorizations"))
+		for _, a := range r.Auth {
+			if a.RawXDR != "" {
+				bw.printf("  %s %s\n", s.dim("raw xdr:"), a.RawXDR)
+				continue
+			}
+			src := ""
+			if a.IsSourceAccount {
+				src = s.dim(" (source account)")
+			}
+			bw.printf("  %s%s\n", s.cyan(a.Address), src)
+			if a.RootInvocation != nil {
+				renderAuthorizedInvocation(bw, s, a.RootInvocation, "    ")
+			}
+		}
+	}
 
 	if n := len(r.Footprint.ReadOnly) + len(r.Footprint.ReadWrite); n > 0 {
 		bw.printf("\n%s\n", s.bold("footprint"))
@@ -167,6 +186,9 @@ func renderSimulate(w io.Writer, r *probe.SimulateResult) error {
 		bw.printf("\n%s\n", s.red("RESTORE REQUIRED"))
 		bw.printf("  This call touches archived entries. They must be restored before it\n")
 		bw.printf("  can run. Restore fee: %s\n", stroops(r.RestoreRequired.MinResourceFee))
+		for _, entry := range r.RestoreRequired.ArchivedEntries {
+			bw.printf("  archived: %s\n", entry)
+		}
 	}
 
 	// Diagnostic events are not printed here: Stellar RPC already embeds a
@@ -276,6 +298,9 @@ func renderInspect(w io.Writer, r *probe.InspectResult) error {
 
 	if !r.Deployed {
 		bw.printf("%s\n", s.red("NOT DEPLOYED  no contract instance entry found on this network"))
+		if r.CloseTimeNote != "" {
+			bw.printf("%s\n", s.dim("note: "+r.CloseTimeNote))
+		}
 		bw.printf("\n%s\n", s.dim(fmt.Sprintf("checked at ledger %d", r.LatestLedger)))
 		return bw.err
 	}
@@ -310,6 +335,9 @@ func renderInspect(w io.Writer, r *probe.InspectResult) error {
 	}
 
 	bw.printf("\n%s %s\n", s.bold("overall"), s.status(r.Status))
+	if r.CloseTimeNote != "" {
+		bw.printf("%s\n", s.dim("note: "+r.CloseTimeNote))
+	}
 	bw.printf("%s\n", s.dim(fmt.Sprintf("checked at ledger %d", r.LatestLedger)))
 	return bw.err
 }
@@ -356,6 +384,9 @@ func renderCheck(w io.Writer, r *probe.CheckResult) error {
 		bw.printf("%s\n", s.red("FAIL"))
 	}
 	bw.printf("%s\n", s.dim(fmt.Sprintf("checked at ledger %d", r.LatestLedger)))
+	if r.CloseTimeNote != "" {
+		bw.printf("%s\n", s.dim("note: "+r.CloseTimeNote))
+	}
 	return bw.err
 }
 
@@ -385,10 +416,101 @@ func renderBatch(w io.Writer, r *probe.BatchResult) error {
 			verdict, detail = s.red("FAIL "), firstNotPassing(item.Result, probe.OutcomeFail)
 		}
 		bw.printf("  %s  %-*s  %s\n", verdict, width, item.Name, detail)
+		if item.Result != nil && item.Result.CloseTimeNote != "" {
+			bw.printf("  %s\n", s.dim("note: "+item.Result.CloseTimeNote))
+		}
 	}
 
 	bw.printf("\n%s %d passed, %d failed, %d could not run\n", s.bold("result"), passed, failed, errored)
 	return bw.err
+}
+
+func renderMarkdownCheck(w io.Writer, r *probe.CheckResult) error {
+	bw := &bufWriter{w: w}
+	verdict := "FAIL"
+	if r.OK {
+		verdict = "PASS"
+	}
+	bw.printf("Contract: %s | Result: **%s**\n\n", markdownCell(r.ContractID), verdict)
+	bw.printf("| Check | Verdict | Details |\n| --- | --- | --- |\n")
+	for _, check := range r.Checks {
+		bw.printf("| %s | %s | %s |\n", markdownCell(check.Name), strings.ToUpper(fmt.Sprint(check.Outcome)), markdownCell(check.Detail))
+	}
+	return bw.err
+}
+
+func renderMarkdownBatch(w io.Writer, r *probe.BatchResult) error {
+	bw := &bufWriter{w: w}
+	verdict := "PASS"
+	if !r.OK {
+		verdict = "FAIL"
+	}
+	passed, failed, errored := 0, 0, 0
+	for _, item := range r.Items {
+		switch {
+		case item.Error != "":
+			errored++
+		case item.Result.OK:
+			passed++
+		default:
+			failed++
+		}
+	}
+	bw.printf("Checks: **%s** (%d passed, %d failed, %d could not run)\n\n", verdict, passed, failed, errored)
+	bw.printf("| Check | Contract | Verdict | Details |\n| --- | --- | --- | --- |\n")
+	for _, item := range r.Items {
+		switch {
+		case item.Error != "":
+			bw.printf("| %s | %s | ERROR | %s |\n", markdownCell(item.Name), markdownCell(item.ContractID), markdownCell(item.Error))
+		case item.Result.OK:
+			bw.printf("| %s | %s | PASS | %s |\n", markdownCell(item.Name), markdownCell(item.ContractID), markdownCell(firstNotPassing(item.Result, probe.OutcomeWarn)))
+		default:
+			bw.printf("| %s | %s | FAIL | %s |\n", markdownCell(item.Name), markdownCell(item.ContractID), markdownCell(firstNotPassing(item.Result, probe.OutcomeFail)))
+		}
+	}
+	return bw.err
+}
+
+func renderMarkdownInspect(w io.Writer, r *probe.InspectResult) error {
+	bw := &bufWriter{w: w}
+	bw.printf("Contract: %s | Status: **%s**\n\n", markdownCell(r.ContractID), markdownCell(fmt.Sprint(r.Status)))
+	bw.printf("| Entry | Verdict | Details |\n| --- | --- | --- |\n")
+	if !r.Deployed {
+		bw.printf("| Deployment | FAIL | %s |\n", markdownCell(r.Instance.Summary))
+		return bw.err
+	}
+	bw.printf("| Instance | %s | %s |\n", markdownCell(fmt.Sprint(r.Instance.Status)), markdownCell(r.Instance.Summary))
+	if r.Code != nil {
+		bw.printf("| Code | %s | %s |\n", markdownCell(fmt.Sprint(r.Code.Status)), markdownCell(r.Code.Summary))
+	}
+	for _, entry := range r.Data {
+		bw.printf("| Data %s | %s | %s |\n", markdownCell(entry.Key), markdownCell(fmt.Sprint(entry.Status)), markdownCell(entry.Summary))
+	}
+	return bw.err
+}
+
+func markdownCell(value string) string {
+	return strings.NewReplacer("\\", "\\\\", "|", "\\|", "`", "\\`", "\r\n", "<br>", "\n", "<br>", "\r", "<br>").Replace(value)
+}
+
+func renderAuthorizedInvocation(bw *bufWriter, s styler, inv *probe.AuthorizedInvocation, indent string) {
+	var args []string
+	for _, arg := range inv.Args {
+		b, err := json.Marshal(arg)
+		if err != nil {
+			args = append(args, fmt.Sprint(arg))
+		} else {
+			args = append(args, string(b))
+		}
+	}
+	target := inv.Function
+	if inv.ContractID != "" {
+		target = inv.ContractID + "::" + inv.Function
+	}
+	bw.printf("%s%s(%s)\n", indent, target, strings.Join(args, ", "))
+	for _, sub := range inv.SubInvocations {
+		renderAuthorizedInvocation(bw, s, &sub, indent+"  ")
+	}
 }
 
 // firstNotPassing describes the first step with the given outcome, or

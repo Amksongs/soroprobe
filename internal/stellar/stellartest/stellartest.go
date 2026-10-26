@@ -106,6 +106,7 @@ type Fake struct {
 	// leaves them alone behaves exactly as it always has.
 	HealthStatus      string
 	NetworkPassphrase string
+	ProtocolVersion   int
 
 	// SimulateRequests and EntryRequests record what the code under test asked
 	// for, so tests can assert on the requests themselves.
@@ -221,7 +222,11 @@ func (f *Fake) GetNetwork(context.Context) (protocol.GetNetworkResponse, error) 
 	if passphrase == "" {
 		passphrase = "Test SDF Network ; September 2015"
 	}
-	return protocol.GetNetworkResponse{Passphrase: passphrase}, nil
+	protoVer := f.ProtocolVersion
+	if protoVer == 0 {
+		protoVer = 27
+	}
+	return protocol.GetNetworkResponse{Passphrase: passphrase, ProtocolVersion: protoVer}, nil
 }
 
 // GetHealth implements stellar.Client.

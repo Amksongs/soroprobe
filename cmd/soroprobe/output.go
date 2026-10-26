@@ -414,3 +414,28 @@ func (b *bufWriter) printf(format string, args ...any) {
 	}
 	_, b.err = fmt.Fprintf(b.w, format, args...)
 }
+
+func renderNetwork(w io.Writer, r *probe.NetworkResult, configuredPassphrase string) error {
+	s := styler{on: colorEnabled(w)}
+	bw := &bufWriter{w: w}
+
+	bw.printf("%-18s %s\n", s.bold("rpc url"), redactURL(r.RPCURL))
+
+	statusStr := r.Status
+	if r.Status == "healthy" {
+		statusStr = s.green(r.Status)
+	} else {
+		statusStr = s.red(r.Status)
+	}
+	bw.printf("%-18s %s\n", s.bold("health"), statusStr)
+	bw.printf("%-18s %d\n", s.bold("latest ledger"), r.LatestLedger)
+	bw.printf("%-18s %d\n", s.bold("protocol"), r.ProtocolVersion)
+
+	if r.PassphraseMatch {
+		bw.printf("%-18s %s\n", s.bold("passphrase"), r.NetworkPassphrase)
+	} else {
+		bw.printf("%-18s %s %s\n", s.bold("passphrase"), s.red(r.NetworkPassphrase), s.red(fmt.Sprintf("(mismatch with configured %q)", configuredPassphrase)))
+	}
+
+	return bw.err
+}

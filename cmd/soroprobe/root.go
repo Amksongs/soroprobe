@@ -75,6 +75,7 @@ well-formed transaction, and that account need not exist or hold a balance.`,
 		newSimulateCmd(opts),
 		newInspectCmd(opts),
 		newCheckCmd(opts),
+		newNetworkCmd(opts),
 		newServeCmd(opts),
 		newVersionCmd(),
 	)

@@ -206,6 +206,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		ContractID:     chi.URLParam(r, "contract"),
 		Function:       query.Get("fn"),
 		Args:           query["arg"],
+		Expect:         query.Get("expect"),
 		DataKeys:       query["key"],
 		DataDurability: durability,
 	}

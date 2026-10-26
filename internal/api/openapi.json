@@ -1,0 +1,814 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SoroProbe API",
+    "version": "1.0.0",
+    "description": "HTTP mirror of the SoroProbe CLI for smart contract health and simulation checks."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [],
+  "paths": {
+    "/readyz": {
+      "get": {
+        "summary": "Readiness check",
+        "description": "Reports whether the configured RPC endpoint is reachable and serves the configured network. Results are reused for a few seconds so frequent probes do not multiply RPC traffic.",
+        "operationId": "readyz",
+        "responses": {
+          "200": {
+            "description": "The RPC endpoint is ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "ready" }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The RPC endpoint is unreachable or serves a different network",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "example": "unready" },
+                    "reason": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "summary": "Liveness check",
+        "description": "Reports that the process is up without calling upstream RPC.",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Process is healthy",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    }
+                  },
+                  "required": ["status"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "OpenAPI specification",
+        "description": "Serves this OpenAPI document.",
+        "operationId": "getOpenAPI",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI specification",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/simulate": {
+      "post": {
+        "summary": "Simulate contract invocation",
+        "description": "Simulate a contract invocation and return its outcome, return value, and cost.",
+        "operationId": "simulate",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Simulation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimulateResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/inspect/{contract}": {
+      "get": {
+        "summary": "Inspect contract state",
+        "description": "Read a contract's state entries and report expiration health.",
+        "operationId": "inspect",
+        "parameters": [
+          {
+            "name": "contract",
+            "in": "path",
+            "required": true,
+            "description": "Contract address in strkey format (C...)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "description": "Contract data key to inspect (type:value form)",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "durability",
+            "in": "query",
+            "required": false,
+            "description": "Durability for data key lookups",
+            "schema": {
+              "type": "string",
+              "enum": ["persistent", "temporary", "temp"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "State inspection result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InspectResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/check/{contract}": {
+      "get": {
+        "summary": "Combined contract health check",
+        "description": "Run deployment, TTL, and read-only simulation health checks.",
+        "operationId": "check",
+        "parameters": [
+          {
+            "name": "contract",
+            "in": "path",
+            "required": true,
+            "description": "Contract address in strkey format (C...)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fn",
+            "in": "query",
+            "required": false,
+            "description": "Function name to simulate as a liveness probe",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "arg",
+            "in": "query",
+            "required": false,
+            "description": "Argument for fn in type:value form",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "expect",
+            "in": "query",
+            "required": false,
+            "description": "Expected return value in type:value form",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "description": "Contract data key to include in TTL check",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "style": "form",
+            "explode": true
+          },
+          {
+            "name": "durability",
+            "in": "query",
+            "required": false,
+            "description": "Durability for data key lookups",
+            "schema": {
+              "type": "string",
+              "enum": ["persistent", "temporary", "temp"]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Health check result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/checks": {
+      "post": {
+        "summary": "Run batch of checks",
+        "description": "Run multiple contract health checks in a single batch request.",
+        "operationId": "checks",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid batch request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Upstream error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": ["error"]
+      },
+      "SimulateRequest": {
+        "type": "object",
+        "properties": {
+          "contract_id": {
+            "type": "string"
+          },
+          "function": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["contract_id", "function"]
+      },
+      "SimulateResult": {
+        "type": "object",
+        "properties": {
+          "contract_id": {
+            "type": "string"
+          },
+          "function": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "signature": {
+            "type": "string"
+          },
+          "encoded_args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "abi_note": {
+            "type": "string"
+          },
+          "success": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string"
+          },
+          "return_value": {},
+          "return_value_xdr": {
+            "type": "string"
+          },
+          "cost": {
+            "$ref": "#/components/schemas/Cost"
+          },
+          "footprint": {
+            "$ref": "#/components/schemas/Footprint"
+          },
+          "restore_required": {
+            "$ref": "#/components/schemas/RestoreInfo"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            }
+          },
+          "auth": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuthEntry"
+            }
+          },
+          "latest_ledger": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "contract_id",
+          "function",
+          "success",
+          "cost",
+          "footprint",
+          "latest_ledger"
+        ]
+      },
+      "Cost": {
+        "type": "object",
+        "properties": {
+          "instructions": {
+            "type": "integer"
+          },
+          "disk_read_bytes": {
+            "type": "integer"
+          },
+          "write_bytes": {
+            "type": "integer"
+          },
+          "resource_fee_stroops": {
+            "type": "integer"
+          },
+          "min_resource_fee_stroops": {
+            "type": "integer"
+          },
+          "estimated_total_fee_stroops": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "instructions",
+          "disk_read_bytes",
+          "write_bytes",
+          "resource_fee_stroops",
+          "min_resource_fee_stroops",
+          "estimated_total_fee_stroops"
+        ]
+      },
+      "Footprint": {
+        "type": "object",
+        "properties": {
+          "read_only": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "read_write": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": ["read_only", "read_write"]
+      },
+      "RestoreInfo": {
+        "type": "object",
+        "properties": {
+          "min_resource_fee_stroops": {
+            "type": "integer"
+          },
+          "transaction_data_xdr": {
+            "type": "string"
+          }
+        },
+        "required": ["min_resource_fee_stroops"]
+      },
+      "Event": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "contract_id": {
+            "type": "string"
+          },
+          "topics": {
+            "type": "array"
+          },
+          "data": {},
+          "in_successful_contract_call": {
+            "type": "boolean"
+          }
+        },
+        "required": ["type", "in_successful_contract_call"]
+      },
+      "AuthEntry": {
+        "type": "object",
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "is_source_account": {
+            "type": "boolean"
+          },
+          "root_invocation": {
+            "$ref": "#/components/schemas/AuthorizedInvocation"
+          },
+          "raw_xdr": {
+            "type": "string"
+          }
+        },
+        "required": ["is_source_account"]
+      },
+      "AuthorizedInvocation": {
+        "type": "object",
+        "properties": {
+          "contract_id": {
+            "type": "string"
+          },
+          "function": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array"
+          },
+          "sub_invocations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuthorizedInvocation"
+            }
+          }
+        }
+      },
+      "InspectResult": {
+        "type": "object",
+        "properties": {
+          "contract_id": {
+            "type": "string"
+          },
+          "deployed": {
+            "type": "boolean"
+          },
+          "executable": {
+            "type": "string"
+          },
+          "wasm_hash": {
+            "type": "string"
+          },
+          "instance": {
+            "$ref": "#/components/schemas/EntryReport"
+          },
+          "code": {
+            "$ref": "#/components/schemas/EntryReport"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntryReport"
+            }
+          },
+          "instance_storage": {},
+          "status": {
+            "$ref": "#/components/schemas/HealthStatus"
+          },
+          "latest_ledger": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "contract_id",
+          "deployed",
+          "instance",
+          "status",
+          "latest_ledger"
+        ]
+      },
+      "EntryReport": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "present": {
+            "type": "boolean"
+          },
+          "live_until_ledger": {
+            "type": "integer"
+          },
+          "current_ledger": {
+            "type": "integer"
+          },
+          "ledgers_remaining": {
+            "type": "integer"
+          },
+          "durability": {
+            "type": "string",
+            "enum": ["persistent", "temporary"]
+          },
+          "status": {
+            "$ref": "#/components/schemas/HealthStatus"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "present",
+          "current_ledger",
+          "ledgers_remaining",
+          "status",
+          "summary"
+        ]
+      },
+      "HealthStatus": {
+        "type": "string",
+        "enum": ["healthy", "warning", "critical", "expired", "missing", "unknown"]
+      },
+      "CheckResult": {
+        "type": "object",
+        "properties": {
+          "contract_id": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "status": {
+            "$ref": "#/components/schemas/HealthStatus"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Check"
+            }
+          },
+          "inspect": {
+            "$ref": "#/components/schemas/InspectResult"
+          },
+          "simulate": {
+            "$ref": "#/components/schemas/SimulateResult"
+          },
+          "latest_ledger": {
+            "type": "integer"
+          }
+        },
+        "required": ["contract_id", "ok", "status", "checks", "latest_ledger"]
+      },
+      "Check": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": ["pass", "warn", "fail", "skip"]
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": ["name", "outcome", "detail"]
+      },
+      "BatchRequest": {
+        "type": "object",
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamedCheck"
+            }
+          }
+        },
+        "required": ["checks"]
+      },
+      "NamedCheck": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "string"
+          },
+          "contract_id": {
+            "type": "string"
+          },
+          "function": {
+            "type": "string"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expect": {
+            "type": "string"
+          },
+          "data_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "data_durability": {
+            "type": "string",
+            "enum": ["persistent", "temporary"]
+          }
+        },
+        "required": ["contract_id"]
+      },
+      "BatchResult": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "errored": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BatchItem"
+            }
+          }
+        },
+        "required": ["ok", "errored", "items"]
+      },
+      "BatchItem": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "contract_id": {
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/CheckResult"
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": ["name", "contract_id"]
+      }
+    }
+  }
+}

@@ -58,6 +58,25 @@ func TestEvaluateConvertsLedgersToTime(t *testing.T) {
 	assert.Equal(t, int64(17_280), got.LedgersRemaining)
 }
 
+func TestEvaluateUsesMeasuredCloseTime(t *testing.T) {
+	t.Parallel()
+
+	got := health.EvaluateWithCloseTime(ptr(1_000_010), 1_000_000, health.DurabilityPersistent, health.DefaultThresholds, 4*time.Second)
+	assert.Equal(t, 40*time.Second, got.EstimatedTimeLeft)
+}
+
+func TestResolveThresholdsPerKindFallsBackIndependently(t *testing.T) {
+	t.Parallel()
+
+	warn := uint32(500)
+	global := health.Thresholds{Warn: 1000, Critical: 100}
+	got := health.ResolveThresholds(health.EntryKindInstance, global, health.ThresholdOverrides{
+		Instance: &health.ThresholdOverride{Warn: &warn},
+	})
+	assert.Equal(t, health.Thresholds{Warn: 500, Critical: 100}, got)
+	assert.Equal(t, global, health.ResolveThresholds(health.EntryKindCode, global, health.ThresholdOverrides{}))
+}
+
 func TestEvaluateExpiredHasNegativeTime(t *testing.T) {
 	t.Parallel()
 

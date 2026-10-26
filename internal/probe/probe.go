@@ -9,6 +9,7 @@ package probe
 import (
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/soroworks/soroprobe/internal/abi"
 	"github.com/soroworks/soroprobe/internal/health"
@@ -18,14 +19,18 @@ import (
 
 // Prober runs health and simulation probes against a network.
 type Prober struct {
-	client     stellar.Client
-	codec      scval.Codec
-	source     string
-	thresholds health.Thresholds
-	log        *slog.Logger
+	client             stellar.Client
+	codec              scval.Codec
+	source             string
+	thresholds         health.Thresholds
+	thresholdOverrides health.ThresholdOverrides
+	log                *slog.Logger
+	ledgerTime         *ledgerTimeCache
 
-	abi     abi.Source
-	network string
+	abi          abi.Source
+	network      string
+	baseFee      int64
+	inspectCache *inspectCache
 }
 
 // Options configures a Prober.
@@ -39,6 +44,8 @@ type Options struct {
 	SourceAccount string
 	// Thresholds control TTL classification. Defaults to health.DefaultThresholds.
 	Thresholds health.Thresholds
+	// ThresholdOverrides optionally replace global thresholds by entry kind.
+	ThresholdOverrides health.ThresholdOverrides
 	// Logger receives debug tracing. Defaults to a discarding logger.
 	Logger *slog.Logger
 
@@ -49,6 +56,14 @@ type Options struct {
 	// Network is the label ABI lookups are filed under ("testnet",
 	// "public", ...). Only read when ABI is set.
 	Network string
+	// InspectCacheTTL enables a bounded cache for Inspect results. Zero, the
+	// default, disables it. A few seconds suits dashboards polling the same
+	// contracts: TTLs change at most once per ledger.
+	InspectCacheTTL time.Duration
+
+	// BaseFee is the base fee per operation in stroops used to estimate total fees.
+	// Defaults to DefaultBaseFee (100 stroops).
+	BaseFee int64
 }
 
 // New builds a Prober.
@@ -68,14 +83,26 @@ func New(opts Options) (*Prober, error) {
 	if opts.Logger == nil {
 		opts.Logger = slog.New(slog.DiscardHandler)
 	}
+	var cache *inspectCache
+	if opts.InspectCacheTTL > 0 {
+		cache = newInspectCache(opts.InspectCacheTTL, inspectCacheMaxEntries)
+	}
+	baseFee := opts.BaseFee
+	if baseFee <= 0 {
+		baseFee = DefaultBaseFee
+	}
 	return &Prober{
-		client:     opts.Client,
-		codec:      opts.Codec,
-		source:     opts.SourceAccount,
-		thresholds: opts.Thresholds,
-		log:        opts.Logger,
-		abi:        opts.ABI,
-		network:    opts.Network,
+		client:             opts.Client,
+		codec:              opts.Codec,
+		source:             opts.SourceAccount,
+		thresholds:         opts.Thresholds,
+		thresholdOverrides: opts.ThresholdOverrides,
+		log:                opts.Logger,
+		ledgerTime:         &ledgerTimeCache{},
+		abi:                opts.ABI,
+		network:            opts.Network,
+		inspectCache:       cache,
+		baseFee:            baseFee,
 	}, nil
 }
 
@@ -96,6 +123,8 @@ type Cost struct {
 	ResourceFee int64 `json:"resource_fee_stroops"`
 	// MinResourceFee is the minimum resource fee RPC recommends adding.
 	MinResourceFee int64 `json:"min_resource_fee_stroops"`
+	// EstimatedTotalFee is the estimated total fee (resource fee plus base inclusion fee) in stroops.
+	EstimatedTotalFee int64 `json:"estimated_total_fee_stroops"`
 }
 
 // Footprint lists the ledger entries an invocation would touch.
@@ -109,6 +138,8 @@ type Footprint struct {
 type RestoreInfo struct {
 	// MinResourceFee is the fee for the required RestoreFootprint operation.
 	MinResourceFee int64 `json:"min_resource_fee_stroops"`
+	// ArchivedEntries are the ledger entries the restore operation would restore.
+	ArchivedEntries []string `json:"archived_entries,omitempty"`
 	// TransactionDataXDR is the base64 SorobanTransactionData for that
 	// operation. SoroProbe never submits it; it is reported so an operator can.
 	TransactionDataXDR string `json:"transaction_data_xdr,omitempty"`

@@ -24,7 +24,7 @@ func TestRenderSimulateSuccess(t *testing.T) {
 		Function:     "decimals",
 		Success:      true,
 		ReturnValue:  uint32(7),
-		Cost:         probe.Cost{Instructions: 127569, MinResourceFee: 12279, ResourceFee: 12279},
+		Cost:         probe.Cost{Instructions: 127569, MinResourceFee: 12279, ResourceFee: 12279, EstimatedTotalFee: 12379},
 		Footprint:    probe.Footprint{ReadOnly: []string{"contract instance CDLZ... (persistent)"}},
 		LatestLedger: 4014125,
 	})
@@ -39,6 +39,45 @@ func TestRenderSimulateSuccess(t *testing.T) {
 	// Fees are shown in both stroops and XLM, since neither alone is obvious.
 	assert.Contains(t, out, "12279 stroops")
 	assert.Contains(t, out, "0.0012279 XLM")
+	assert.Contains(t, out, "estimated total fee")
+	assert.Contains(t, out, "12379 stroops")
+	assert.Contains(t, out, "0.0012379 XLM")
+}
+
+func TestRenderSimulateShowsAuth(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	err := renderSimulate(&buf, &probe.SimulateResult{
+		ContractID: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+		Function:   "transfer",
+		Success:    true,
+		Auth: []probe.AuthEntry{
+			{
+				Address:         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+				IsSourceAccount: true,
+				RootInvocation: &probe.AuthorizedInvocation{
+					ContractID: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+					Function:   "transfer",
+					Args:       []any{"GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF", "GB...", "100"},
+				},
+			},
+			{
+				RawXDR: "AAAA...rawXDR",
+			},
+		},
+		Cost:         probe.Cost{EstimatedTotalFee: 12379},
+		LatestLedger: 4014125,
+	})
+	require.NoError(t, err)
+
+	out := buf.String()
+	assert.Contains(t, out, "authorizations")
+	assert.Contains(t, out, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF")
+	assert.Contains(t, out, "(source account)")
+	assert.Contains(t, out, "transfer")
+	assert.Contains(t, out, "raw xdr:")
+	assert.Contains(t, out, "AAAA...rawXDR")
 }
 
 func TestRenderSimulateShowsInterfaceTyping(t *testing.T) {
@@ -379,4 +418,58 @@ func TestRenderBatch(t *testing.T) {
 	assert.Contains(t, out, "FAIL   vault   code_ttl: expired")
 	assert.Contains(t, out, "ERROR  broken  invalid contract id")
 	assert.Contains(t, out, "1 passed, 1 failed, 1 could not run")
+}
+
+func TestRenderMarkdownCheckGolden(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	err := renderMarkdownCheck(&buf, &probe.CheckResult{
+		ContractID: "C|`token",
+		OK:         false,
+		Checks: []probe.Check{
+			{Name: "instance_ttl", Outcome: probe.OutcomeFail, Detail: "expired | restore `now`\nsecond line"},
+		},
+	})
+	require.NoError(t, err)
+
+	want, err := os.ReadFile("testdata/check_markdown.golden")
+	require.NoError(t, err)
+	assert.Equal(t, string(want)+"\n", buf.String())
+}
+
+func TestRenderMarkdownBatchEscapesContractAndError(t *testing.T) {
+	var buf bytes.Buffer
+	err := renderMarkdownBatch(&buf, &probe.BatchResult{Items: []probe.BatchItem{{
+		Name:       "broken",
+		ContractID: "C|`one",
+		Error:      "bad | `value`\nsecond line",
+	}}})
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "| broken | C\\|\\`one | ERROR | bad \\| \\`value\\`<br>second line |")
+}
+
+func TestRenderMarkdownInspect(t *testing.T) {
+	var buf bytes.Buffer
+	err := renderMarkdownInspect(&buf, &probe.InspectResult{
+		ContractID: "C|`one",
+		Deployed:   true,
+		Instance:   probe.EntryReport{TTL: health.TTL{Status: health.StatusHealthy}, Summary: "instance found"},
+		Data:       []probe.EntryReport{{Key: "key|one", TTL: health.TTL{Status: health.StatusWarning}, Summary: "expires soon"}},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "Contract: C\\|\\`one")
+	assert.Contains(t, buf.String(), "| Data key\\|one | warning | expires soon |")
+}
+
+func TestRenderSimulateRestoreRequiredListsArchivedEntries(t *testing.T) {
+	var buf bytes.Buffer
+	err := renderSimulate(&buf, &probe.SimulateResult{
+		RestoreRequired: &probe.RestoreInfo{
+			MinResourceFee:  2,
+			ArchivedEntries: []string{"contract data C... (persistent)"},
+		},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "archived: contract data C... (persistent)")
 }

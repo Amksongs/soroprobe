@@ -58,7 +58,7 @@ check: fmt vet test ## Format, vet and test — run before opening a PR
 
 .PHONY: fixtures
 fixtures: ## Re-record test fixtures from the live testnet
-	$(GO) run ./internal/stellar/stellartest/record
+	$(GO) run ./internal/stellar/stellartest/record $(FIXTURE_FLAGS)
 
 .PHONY: run
 run: ## Run the HTTP API locally

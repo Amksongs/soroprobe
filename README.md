@@ -210,12 +210,19 @@ days" means something very different for a temporary entry than a persistent one
 | `missing` | No such entry exists on the ledger |
 | `unknown` | Entry exists but reported no TTL |
 
-Thresholds are configurable with `--warn-ledgers` and `--critical-ledgers`.
+Global thresholds are configurable with `--warn-ledgers` and
+`--critical-ledgers`. Optional instance, code and data thresholds override
+those values independently; each kind accepts `warn` and `critical` values.
+For example, use `--data-warn-ledgers` or `DATA_WARN_LEDGERS`. The config file
+uses a `thresholds` object with `instance`, `code` and `data` objects, each
+containing optional `warn` and `critical` ledger counts. Reports include the
+effective thresholds applied to every entry.
 
-**A note on the time estimates.** SoroProbe converts ledgers to wall-clock time
-at the network's five-second target close time, which measured exactly 5.00s
-when verified. Real close times drift slightly, so treat the **ledger count as
-authoritative** and the duration as a convenience.
+**A note on the time estimates.** SoroProbe measures the average close time of
+the 20 most recent ledgers and uses it to convert ledger counts to wall-clock
+time. If RPC cannot provide that measurement, it falls back to the five-second
+target and says so in the report. Treat the **ledger count as authoritative**
+and the duration as a convenience.
 
 **Three things worth knowing:**
 
@@ -475,13 +482,23 @@ simulation step is honestly reported as `SKIP`.
 ### `soroprobe serve`
 
 Runs the HTTP API. It binds `127.0.0.1:8080` by default; `--addr` overrides
-`HTTP_ADDR`.
+`HTTP_ADDR`. Set `API_TOKEN` (or `--api-token`) to require a bearer token on
+the `/v1` routes — see [Authentication](#authentication).
+
+`--inspect-cache-ttl` (env `INSPECT_CACHE_TTL`) lets the server reuse an inspect
+result for the same contract, durability and key set for that long. It is **off
+by default**: TTLs change at most once per ledger (about five seconds), so a
+cached answer can lag a ledger boundary, and on-demand computation keeps every
+response current. A value of `3s`–`5s` is reasonable for dashboards that poll
+the same contracts. A cached response still reports the ledger it was computed
+at in `latest_ledger`; simulations are never cached. The cache is bounded to 256
+entries, and expired entries are dropped on read.
 
 ### Global flags
 
-`--json`, `--config`, `--rpc-url`, `--network-passphrase`, `--source-account`,
-`--log-level`, `--timeout`, `--warn-ledgers`, `--critical-ledgers`,
-`--sorovault-url`.
+`--json`, `--config`, `--profile`, `--rpc-url`, `--network-passphrase`, `--source-account`,
+`--log-level`, `--log-format`, `--timeout`, `--warn-ledgers`,
+`--critical-ledgers`, `--sorovault-url`.
 
 ## Argument encoding
 
@@ -628,6 +645,34 @@ Set `CORS_ORIGINS` to a comma-separated list of exact browser origins, such as
 `https://dashboard.example,https://admin.example`, to enable CORS. Unset means
 no CORS headers. Preflight requests are answered only for listed origins.
 
+### Authentication
+
+The API is unauthenticated by default, which is fine on a private network.
+Exposed more widely, anyone who can reach it can make it spend the operator's
+RPC quota — a paid provider, often — on arbitrary simulations. Set a token to
+stop that:
+
+```bash
+export API_TOKEN="$(openssl rand -hex 32)"
+soroprobe serve --addr 0.0.0.0:8080       # or: serve --api-token <token>
+```
+
+With a token set, every route under `/v1` requires
+`Authorization: Bearer <token>`; anything else is a **401** with a
+`WWW-Authenticate` header. `/healthz` never requires auth, so a liveness probe
+needs no credential. Unset keeps today's open behaviour. Two details are
+enforced rather than advised:
+
+- **Tokens shorter than 16 characters are rejected at startup.** A token short
+  enough to guess is not meaningfully different from no token at all.
+- **Comparison is constant-time**, so response timing cannot be used to
+  discover the token one character at a time.
+
+```bash
+curl -s -H "Authorization: Bearer $API_TOKEN" \
+  localhost:8080/v1/inspect/CDLZ… | jq
+```
+
 ### `GET /healthz`
 
 Liveness. Deliberately does **not** call out to the network, so the probe does
@@ -709,6 +754,7 @@ run sequentially; split larger batches or use the CLI.
 | --- | --- |
 | 200 | The probe ran. **Read `success` / `ok` in the body for the verdict.** |
 | 400 | Bad input — malformed contract id, bad argument, unknown durability |
+| 401 | `API_TOKEN` is set and the bearer token is missing or wrong |
 | 404 | No such route |
 | 502 | Upstream RPC failed |
 | 503 | `/readyz` only: the RPC endpoint is unreachable, unhealthy, or on another network |
@@ -725,11 +771,14 @@ pointed at the API cannot be tricked into interpreting a JSON body as HTML.
 Routes under `/v1` — and `GET /readyz` — also carry `Cache-Control: no-store`:
 their answers describe live on-chain state, and a cached health result would
 be worse than no result. `/healthz` is exempt — it holds no chain state and is
-meant to be polled cheaply.
+meant to be polled cheaply. The optional in-process inspect cache
+(`--inspect-cache-ttl`) is separate: it serves a recent answer for at most the
+configured few seconds and still reports the ledger it was computed at, but
+clients are never told to cache it.
 
 ## Configuration
 
-Precedence, lowest to highest: **defaults → config file → environment → flags**.
+Precedence, lowest to highest: **defaults → top-level config file keys → profile → environment → flags**.
 
 | Environment variable | Flag | Default |
 | --- | --- | --- |
@@ -738,12 +787,29 @@ Precedence, lowest to highest: **defaults → config file → environment → fl
 | `SOURCE_ACCOUNT` | `--source-account` | all-zero placeholder |
 | `HTTP_ADDR` | `--addr` (on `serve`) | `127.0.0.1:8080` |
 | `CORS_ORIGINS` | — | unset; no CORS headers |
+| `API_TOKEN` | `--api-token` (on `serve`) | unset — `/v1` routes are open |
 | `LOG_LEVEL` | `--log-level` | `info` |
+| `LOG_FORMAT` | `--log-format` | `text` |
 | `RPC_TIMEOUT` | `--timeout` | `30s` |
+| `INSPECT_CACHE_TTL` | `--inspect-cache-ttl` (on `serve`) | `0s` (off) |
 | `WARN_LEDGERS` | `--warn-ledgers` | `120960` (≈7 days) |
 | `CRITICAL_LEDGERS` | `--critical-ledgers` | `17280` (≈1 day) |
+| `INSTANCE_WARN_LEDGERS`, `INSTANCE_CRITICAL_LEDGERS` | `--instance-warn-ledgers`, `--instance-critical-ledgers` | global thresholds |
+| `CODE_WARN_LEDGERS`, `CODE_CRITICAL_LEDGERS` | `--code-warn-ledgers`, `--code-critical-ledgers` | global thresholds |
+| `DATA_WARN_LEDGERS`, `DATA_CRITICAL_LEDGERS` | `--data-warn-ledgers`, `--data-critical-ledgers` | global thresholds |
 | `SOROVAULT_URL` | `--sorovault-url` | unset — [type arguments from SoroVault](#typing-arguments-from-sorovault) |
-| `SOROPROBE_CONFIG` | `--config` | `./soroprobe.json` if present |
+| `SOROPROBE_CONFIG` | `--config` | `./soroprobe.json` (then `./soroprobe.yaml`, `./soroprobe.yml`) if present |
+| `SOROPROBE_PROFILE` | `--profile` | unset |
+
+To type arguments from a contract's on-chain interface instead of SoroVault,
+pass `--abi-from-chain`. Stellar Asset Contracts have no Wasm interface and
+continue with inferred argument types, with a note in the result.
+
+Logs go to **stderr** in both formats, so redirecting stdout (or consuming
+`--json` output) never mixes a log line into the document being parsed.
+`LOG_FORMAT=json` (or `--log-format json`) emits one JSON object per line —
+filterable by field (`contract`, `status`) in CI and log aggregators instead
+of regex-parsed. `text`, the default, keeps the readable `key=value` lines.
 
 [.env.example](.env.example) documents every variable. SoroProbe reads the
 **environment**, not `.env` itself, so load it yourself:
@@ -753,14 +819,45 @@ set -a && . ./.env && set +a
 docker run --env-file .env soroprobe check <contract>
 ```
 
-A config file, by contrast, is read directly. It is JSON with snake_case keys:
+A config file, by contrast, is read directly. JSON and YAML formats (`soroprobe.json`, `soroprobe.yaml`, `soroprobe.yml`) are supported, with snake_case keys (unknown keys are rejected in both formats). When no path is specified, SoroProbe looks for `soroprobe.json`, then `soroprobe.yaml`, and finally `soroprobe.yml`.
+
+### Profiles
+
+Config files can define named `profiles` for different networks (such as `testnet`, `mainnet`, or `local`). Select a profile using `--profile <name>` or the `SOROPROBE_PROFILE` environment variable. An unknown profile name produces an error listing the available profiles.
+
+In JSON:
 
 ```json
 {
   "rpc_url": "https://soroban-testnet.stellar.org",
   "warn_ledgers": 120960,
-  "critical_ledgers": 17280
+  "critical_ledgers": 17280,
+  "inspect_cache_ttl": "0s",
+  "profiles": {
+    "mainnet": {
+      "rpc_url": "https://rpc.mainnet.stellar.org",
+      "network_passphrase": "Public Global Stellar Network ; September 2015",
+      "warn_ledgers": 172800,
+      "critical_ledgers": 34560
+    }
+  }
 }
+```
+
+Or in YAML:
+
+```yaml
+# SoroProbe configuration
+rpc_url: https://soroban-testnet.stellar.org
+warn_ledgers: 120960
+critical_ledgers: 17280
+
+profiles:
+  mainnet:
+    rpc_url: https://rpc.mainnet.stellar.org
+    network_passphrase: "Public Global Stellar Network ; September 2015"
+    warn_ledgers: 172800
+    critical_ledgers: 34560
 ```
 
 ## Why no secret key

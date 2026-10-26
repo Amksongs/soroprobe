@@ -362,6 +362,38 @@ func TestCheckEndpointPassesArgs(t *testing.T) {
 	assert.Len(t, args, 2)
 }
 
+func TestCheckEndpointCostBudget(t *testing.T) {
+	t.Parallel()
+
+	h := newServer(t, stellartest.NewFake(t))
+
+	t.Run("passes when cost within budget", func(t *testing.T) {
+		var result probe.CheckResult
+		rec := do(t, h, http.MethodGet, "/v1/check/"+stellartest.SACContract+"?fn=decimals&max_instructions=150000&max_fee=20000", "", &result)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.True(t, result.OK)
+	})
+
+	t.Run("fails when instructions exceed budget", func(t *testing.T) {
+		var result probe.CheckResult
+		rec := do(t, h, http.MethodGet, "/v1/check/"+stellartest.SACContract+"?fn=decimals&max_instructions=100000", "", &result)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.False(t, result.OK)
+	})
+
+	t.Run("fails when fee exceeds budget", func(t *testing.T) {
+		var result probe.CheckResult
+		rec := do(t, h, http.MethodGet, "/v1/check/"+stellartest.SACContract+"?fn=decimals&max_fee=10000", "", &result)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.False(t, result.OK)
+	})
+
+	t.Run("bad query param returns 400", func(t *testing.T) {
+		rec := do(t, h, http.MethodGet, "/v1/check/"+stellartest.SACContract+"?fn=decimals&max_instructions=invalid", "", nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+}
+
 func TestNoWriteRoutesExist(t *testing.T) {
 	t.Parallel()
 

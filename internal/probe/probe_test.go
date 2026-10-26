@@ -550,3 +550,89 @@ func TestCheckPropagatesTransportErrors(t *testing.T) {
 	_, err := p.Check(context.Background(), probe.CheckRequest{ContractID: stellartest.SACContract})
 	require.Error(t, err)
 }
+
+func TestCheckCostBudget(t *testing.T) {
+	t.Parallel()
+
+	uint32Ptr := func(v uint32) *uint32 { return &v }
+	int64Ptr := func(v int64) *int64 { return &v }
+
+	t.Run("no cost check when limits are not set", func(t *testing.T) {
+		t.Parallel()
+		fake := stellartest.NewFake(t)
+		p := newProber(t, fake, health.DefaultThresholds)
+
+		res, err := p.Check(context.Background(), probe.CheckRequest{
+			ContractID: stellartest.SACContract,
+			Function:   "decimals",
+		})
+		require.NoError(t, err)
+		assert.True(t, res.OK)
+		_, hasCost := outcomes(res)["cost"]
+		assert.False(t, hasCost)
+	})
+
+	t.Run("cost check passes within limits", func(t *testing.T) {
+		t.Parallel()
+		fake := stellartest.NewFake(t)
+		p := newProber(t, fake, health.DefaultThresholds)
+
+		res, err := p.Check(context.Background(), probe.CheckRequest{
+			ContractID:      stellartest.SACContract,
+			Function:        "decimals",
+			MaxInstructions: uint32Ptr(150000),
+			MaxFeeStroops:   int64Ptr(20000),
+			MaxWriteBytes:   uint32Ptr(100),
+		})
+		require.NoError(t, err)
+		assert.True(t, res.OK)
+		assert.Equal(t, probe.OutcomePass, outcomes(res)["cost"])
+	})
+
+	t.Run("cost check fails when instructions exceeded", func(t *testing.T) {
+		t.Parallel()
+		fake := stellartest.NewFake(t)
+		p := newProber(t, fake, health.DefaultThresholds)
+
+		res, err := p.Check(context.Background(), probe.CheckRequest{
+			ContractID:      stellartest.SACContract,
+			Function:        "decimals",
+			MaxInstructions: uint32Ptr(100000), // actual is 127569
+		})
+		require.NoError(t, err)
+		assert.False(t, res.OK)
+		assert.Equal(t, probe.OutcomeFail, outcomes(res)["cost"])
+	})
+
+	t.Run("cost check fails when fee exceeded", func(t *testing.T) {
+		t.Parallel()
+		fake := stellartest.NewFake(t)
+		p := newProber(t, fake, health.DefaultThresholds)
+
+		res, err := p.Check(context.Background(), probe.CheckRequest{
+			ContractID:    stellartest.SACContract,
+			Function:      "decimals",
+			MaxFeeStroops: int64Ptr(10000), // actual is 12279
+		})
+		require.NoError(t, err)
+		assert.False(t, res.OK)
+		assert.Equal(t, probe.OutcomeFail, outcomes(res)["cost"])
+	})
+
+	t.Run("failed simulation reports simulation failure rather than cost failure", func(t *testing.T) {
+		t.Parallel()
+		fake := stellartest.NewFake(t)
+		p := newProber(t, fake, health.DefaultThresholds)
+
+		res, err := p.Check(context.Background(), probe.CheckRequest{
+			ContractID:      stellartest.SACContract,
+			Function:        "no_such_fn",
+			MaxInstructions: uint32Ptr(10),
+		})
+		require.NoError(t, err)
+		assert.False(t, res.OK)
+		assert.Equal(t, probe.OutcomeFail, outcomes(res)["simulate"])
+		_, hasCost := outcomes(res)["cost"]
+		assert.False(t, hasCost, "cost check must not run on failed simulation")
+	})
+}

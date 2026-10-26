@@ -388,10 +388,13 @@ Combined health check, designed for CI.
 | `--key <spec>` | A contract data key to include in the TTL check. Repeatable. |
 | `--key-file <path>` | A file listing data keys, one spec per line. Combined with `--key`. |
 | `--durability <d>` | Durability for `--key` lookups. |
+| `--max-instructions <n>` | Fail when simulation consumes more CPU instructions than this limit. |
+| `--max-fee <stroops>` | Fail when simulation resource fee exceeds this limit in stroops. |
+| `--max-write-bytes <n>` | Fail when simulation write bytes exceeds this limit. |
 | `--report <path>` | Also write the JSON result to this file, for a CI artifact. |
 
-Checks run in order: `deployed`, `instance_ttl`, `code_ttl`, any `data_ttl`, then
-`simulate`.
+Checks run in order: `deployed`, `instance_ttl`, `code_ttl`, any `data_ttl`, `simulate`,
+then `cost` (when limits are set).
 
 **Exit codes:**
 
@@ -690,7 +693,7 @@ many ledgers, exactly as `inspect --estimate-extend` does.
 
 ### `GET /v1/check/{contract}`
 
-Query parameters: `fn`, `arg` (repeatable), `key` (repeatable), `durability`.
+Query parameters: `fn`, `arg` (repeatable), `key` (repeatable), `durability`, `max_instructions`, `max_fee` (stroops), `max_write_bytes`.
 
 ### `POST /v1/checks`
 

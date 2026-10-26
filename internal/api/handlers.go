@@ -202,13 +202,42 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := r.URL.Query()
-	result, err := s.prober.Check(r.Context(), probe.CheckRequest{
+	checkReq := probe.CheckRequest{
 		ContractID:     chi.URLParam(r, "contract"),
 		Function:       query.Get("fn"),
 		Args:           query["arg"],
 		DataKeys:       query["key"],
 		DataDurability: durability,
-	})
+	}
+
+	if val := query.Get("max_instructions"); val != "" {
+		v, err := strconv.ParseUint(val, 10, 32)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid max_instructions: %w", err))
+			return
+		}
+		u32v := uint32(v)
+		checkReq.MaxInstructions = &u32v
+	}
+	if val := query.Get("max_fee"); val != "" {
+		v, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid max_fee: %w", err))
+			return
+		}
+		checkReq.MaxFeeStroops = &v
+	}
+	if val := query.Get("max_write_bytes"); val != "" {
+		v, err := strconv.ParseUint(val, 10, 32)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid max_write_bytes: %w", err))
+			return
+		}
+		u32v := uint32(v)
+		checkReq.MaxWriteBytes = &u32v
+	}
+
+	result, err := s.prober.Check(r.Context(), checkReq)
 	if err != nil {
 		writeError(w, statusForError(err), err)
 		return

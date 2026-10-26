@@ -490,6 +490,22 @@ func TestCheckRunsEndToEndAgainstTheFake(t *testing.T) {
 		assert.False(t, errors.As(err, &failed))
 		assert.Contains(t, err.Error(), "invalid contract id")
 	})
+
+	t.Run("cost budget check passes within limit", func(t *testing.T) {
+		out, err := runWithFake(t, fake, "check", "--fn", "decimals", "--max-instructions", "150000", "--max-fee", "20000", "--max-write-bytes", "100", stellartest.SACContract)
+		require.NoError(t, err)
+		assert.Contains(t, out, "PASS")
+		assert.Contains(t, out, "cost")
+	})
+
+	t.Run("cost budget check fails when limit exceeded", func(t *testing.T) {
+		out, err := runWithFake(t, fake, "check", "--fn", "decimals", "--max-instructions", "100000", stellartest.SACContract)
+		require.Error(t, err)
+		assertExitCodeOne(t, err)
+		assert.Contains(t, out, "FAIL")
+		assert.Contains(t, out, "cost")
+		assert.Contains(t, out, "instructions 127569 exceeds limit 100000")
+	})
 }
 
 func TestCheckFileRunsEndToEndAgainstTheFake(t *testing.T) {

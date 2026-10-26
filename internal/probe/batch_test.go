@@ -37,6 +37,39 @@ func TestCheckBatchAllPass(t *testing.T) {
 	assert.True(t, result.Items[0].Result.OK)
 }
 
+func TestCheckBatchWithCostBudget(t *testing.T) {
+	t.Parallel()
+	p := newProber(t, stellartest.NewFake(t), health.DefaultThresholds)
+
+	maxInstPass := uint32(200000)
+	maxInstFail := uint32(50000)
+
+	result, err := p.CheckBatch(context.Background(), probe.BatchRequest{Checks: []probe.NamedCheck{
+		{
+			Name: "passes_budget",
+			CheckRequest: probe.CheckRequest{
+				ContractID:      stellartest.SACContract,
+				Function:        "decimals",
+				MaxInstructions: &maxInstPass,
+			},
+		},
+		{
+			Name: "fails_budget",
+			CheckRequest: probe.CheckRequest{
+				ContractID:      stellartest.SACContract,
+				Function:        "decimals",
+				MaxInstructions: &maxInstFail,
+			},
+		},
+	}})
+	require.NoError(t, err)
+
+	assert.False(t, result.OK)
+	require.Len(t, result.Items, 2)
+	assert.True(t, result.Items[0].Result.OK)
+	assert.False(t, result.Items[1].Result.OK)
+}
+
 func TestCheckBatchConcurrentKeepsInputOrder(t *testing.T) {
 	t.Parallel()
 	p := newProber(t, stellartest.NewFake(t), health.DefaultThresholds)

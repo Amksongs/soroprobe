@@ -170,6 +170,10 @@ func TestRPCClientWrapsErrorsWithMethodName(t *testing.T) {
 	_, err = client.GetHealth(ctx)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "getHealth")
+
+	_, err = client.GetEvents(ctx, protocol.GetEventsRequest{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "getEvents")
 }
 
 func TestRPCClientHandlesTransportFailure(t *testing.T) {

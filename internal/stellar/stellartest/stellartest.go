@@ -80,6 +80,14 @@ func LoadLatestLedger(t testing.TB) protocol.GetLatestLedgerResponse {
 	return resp
 }
 
+// LoadEvents decodes the getEvents fixture.
+func LoadEvents(t testing.TB) protocol.GetEventsResponse {
+	t.Helper()
+	var resp protocol.GetEventsResponse
+	Load(t, "events.json", &resp)
+	return resp
+}
+
 // Fake is a stellar.Client backed by fixtures.
 //
 // The zero value is usable but returns nothing; prefer NewFake.
@@ -101,16 +109,21 @@ type Fake struct {
 	// HealthErr and NetworkErr inject getHealth and getNetwork failures.
 	HealthErr  error
 	NetworkErr error
+	EventsErr  error
 	// HealthStatus and NetworkPassphrase override what getHealth and
 	// getNetwork report. Empty keeps the default answer, so a Fake that
 	// leaves them alone behaves exactly as it always has.
 	HealthStatus      string
 	NetworkPassphrase string
 
+	// EventsData overrides the events returned by GetEvents.
+	EventsData protocol.GetEventsResponse
+
 	// SimulateRequests and EntryRequests record what the code under test asked
 	// for, so tests can assert on the requests themselves.
 	SimulateRequests []protocol.SimulateTransactionRequest
 	EntryRequests    [][]string
+	EventsRequests   []protocol.GetEventsRequest
 	// HealthRequests and NetworkRequests count readiness probes, so a test
 	// can assert that a cache kept them from multiplying.
 	HealthRequests  int
@@ -153,6 +166,7 @@ func NewFake(t testing.TB) *Fake {
 	f.Simulations["decimals"] = LoadSimulate(t, "simulate_success.json")
 	f.Simulations["no_such_fn"] = LoadSimulate(t, "simulate_failure.json")
 	f.Simulations[ExtendFootprintTTL] = LoadSimulate(t, "simulate_extend.json")
+	f.EventsData = LoadEvents(t)
 	return f
 }
 
@@ -237,6 +251,60 @@ func (f *Fake) GetHealth(context.Context) (protocol.GetHealthResponse, error) {
 		status = "healthy"
 	}
 	return protocol.GetHealthResponse{Status: status, LatestLedger: f.LatestLedger}, nil
+}
+
+// GetEvents implements stellar.Client.
+func (f *Fake) GetEvents(_ context.Context, req protocol.GetEventsRequest) (protocol.GetEventsResponse, error) {
+	f.mu.Lock()
+	f.EventsRequests = append(f.EventsRequests, req)
+	f.mu.Unlock()
+	if f.EventsErr != nil {
+		return protocol.GetEventsResponse{}, f.EventsErr
+	}
+
+	resp := f.EventsData
+	// Filter by contract ID if specified
+	var filtered []protocol.EventInfo
+	for _, ev := range resp.Events {
+		matched := true
+		for _, filter := range req.Filters {
+			if len(filter.ContractIDs) > 0 {
+				found := false
+				for _, cid := range filter.ContractIDs {
+					if ev.ContractID == cid {
+						found = true
+						break
+					}
+				}
+				if !found {
+					matched = false
+					break
+				}
+			}
+			if len(filter.Topics) > 0 && len(ev.TopicXDR) > 0 {
+				// Basic topic check against first topic segment
+				for _, tf := range filter.Topics {
+					if len(tf) > 0 && tf[0].ScVal != nil {
+						wantScValB64, err := xdr.MarshalBase64(tf[0].ScVal)
+						if err == nil && ev.TopicXDR[0] != wantScValB64 {
+							matched = false
+							break
+						}
+					}
+				}
+			}
+		}
+		if matched {
+			filtered = append(filtered, ev)
+		}
+	}
+
+	if req.Pagination != nil && req.Pagination.Limit > 0 && uint(len(filtered)) > req.Pagination.Limit {
+		filtered = filtered[:req.Pagination.Limit]
+	}
+
+	resp.Events = filtered
+	return resp, nil
 }
 
 // SetTTL overrides the liveUntilLedgerSeq of every stored entry belonging to a

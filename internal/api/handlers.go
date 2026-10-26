@@ -220,6 +220,45 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	contractID := chi.URLParam(r, "contract")
+	if contractID == "" {
+		writeError(w, http.StatusBadRequest, errors.New("contract id is required"))
+		return
+	}
+
+	opts := probe.EventsOptions{
+		Topic:  r.URL.Query().Get("topic"),
+		Cursor: r.URL.Query().Get("cursor"),
+	}
+
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		limit, err := strconv.ParseUint(limitStr, 10, 32)
+		if err != nil || limit == 0 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid limit %q", limitStr))
+			return
+		}
+		opts.Limit = uint(limit)
+	}
+
+	if startStr := r.URL.Query().Get("start_ledger"); startStr != "" {
+		start, err := strconv.ParseUint(startStr, 10, 32)
+		if err != nil || start == 0 {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid start_ledger %q", startStr))
+			return
+		}
+		opts.StartLedger = uint32(start)
+	}
+
+	res, err := s.prober.Events(r.Context(), contractID, opts)
+	if err != nil {
+		writeError(w, statusForError(err), err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, res)
+}
+
 func durabilityParam(r *http.Request) (health.Durability, error) {
 	switch strings.ToLower(r.URL.Query().Get("durability")) {
 	case "", "persistent":

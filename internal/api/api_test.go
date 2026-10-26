@@ -681,3 +681,31 @@ func TestLivenessStillIgnoresReadiness(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "ok", body["status"])
 }
+
+func TestGetEventsEndpoint(t *testing.T) {
+	t.Parallel()
+
+	fake := stellartest.NewFake(t)
+	h := newServer(t, fake)
+
+	t.Run("returns events for contract", func(t *testing.T) {
+		var res probe.EventsResult
+		rec := do(t, h, http.MethodGet, "/v1/events/"+stellartest.SACContract, "", &res)
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, stellartest.SACContract, res.ContractID)
+		assert.Len(t, res.Events, 2)
+	})
+
+	t.Run("supports topic and limit query parameters", func(t *testing.T) {
+		var res probe.EventsResult
+		rec := do(t, h, http.MethodGet, "/v1/events/"+stellartest.SACContract+"?topic=sym:transfer&limit=1", "", &res)
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Len(t, res.Events, 1)
+		assert.Equal(t, "transfer", res.Events[0].Topics[0])
+	})
+
+	t.Run("invalid contract id returns 400", func(t *testing.T) {
+		rec := do(t, h, http.MethodGet, "/v1/events/invalid-contract", "", nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+}

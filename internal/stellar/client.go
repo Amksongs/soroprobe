@@ -36,6 +36,8 @@ type Client interface {
 	GetNetwork(ctx context.Context) (protocol.GetNetworkResponse, error)
 	// GetHealth reports RPC server health and its retention window.
 	GetHealth(ctx context.Context) (protocol.GetHealthResponse, error)
+	// GetEvents retrieves contract events matching the specified filters.
+	GetEvents(ctx context.Context, req protocol.GetEventsRequest) (protocol.GetEventsResponse, error)
 }
 
 // RPCClient is the live Client, backed by the Stellar RPC JSON-RPC API.
@@ -155,6 +157,20 @@ func (c *RPCClient) GetHealth(ctx context.Context) (protocol.GetHealthResponse, 
 	resp, err := c.inner.GetHealth(ctx)
 	if err != nil {
 		return resp, fmt.Errorf("getHealth: %w", err)
+	}
+	return resp, nil
+}
+
+// GetEvents implements Client.
+func (c *RPCClient) GetEvents(ctx context.Context, req protocol.GetEventsRequest) (protocol.GetEventsResponse, error) {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+
+	start := time.Now()
+	resp, err := c.inner.GetEvents(ctx, req)
+	c.log.Debug("getEvents", "events", len(resp.Events), "took", time.Since(start), "err", err)
+	if err != nil {
+		return resp, fmt.Errorf("getEvents: %w", err)
 	}
 	return resp, nil
 }

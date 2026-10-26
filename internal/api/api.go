@@ -111,6 +111,7 @@ func New(opts Options) *Server {
 		r.Get("/inspect/{contract}", s.handleInspect)
 		r.Get("/check/{contract}", s.handleCheck)
 		r.Post("/checks", s.handleChecks)
+		r.Get("/events/{contract}", s.handleEvents)
 	})
 
 	s.router = r

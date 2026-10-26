@@ -120,6 +120,24 @@ func run(rpcURL, outDir, sac, wasm, undeployed, source string) error {
 	}
 	fmt.Printf("recorded simulate_extend.json (error=%q)\n", truncate(extendResp.Error, 40))
 
+	// Events: get recent events for the SAC contract.
+	eventsResp, err := client.GetEvents(ctx, protocol.GetEventsRequest{
+		StartLedger: latest.Sequence - 100,
+		Filters: []protocol.EventFilter{
+			{ContractIDs: []string{sac}},
+		},
+		Pagination: &protocol.PaginationOptions{Limit: 10},
+	})
+	if err != nil {
+		// Non-fatal if testnet has no events or RPC doesn't support retention
+		fmt.Printf("recording events skipped: %v\n", err)
+	} else {
+		if err := write(outDir, "events.json", eventsResp); err != nil {
+			return err
+		}
+		fmt.Printf("recorded events.json (%d events)\n", len(eventsResp.Events))
+	}
+
 	return nil
 }
 

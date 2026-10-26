@@ -1,0 +1,39 @@
+{
+  "events": [
+    {
+      "type": "contract",
+      "ledger": 1002,
+      "ledgerClosedAt": "2026-10-23T14:15:30Z",
+      "contractId": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      "id": "0000001002-0000000001",
+      "operationIndex": 0,
+      "transactionIndex": 0,
+      "txHash": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "AAAADwAAAAV2b3RlZAAAAA==",
+        "AAAAAwAAAAE="
+      ],
+      "value": "AAAAAwAAAAo="
+    },
+    {
+      "type": "contract",
+      "ledger": 1001,
+      "ledgerClosedAt": "2026-10-23T14:15:25Z",
+      "contractId": "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      "id": "0000001001-0000000001",
+      "operationIndex": 0,
+      "transactionIndex": 0,
+      "txHash": "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+      "inSuccessfulContractCall": true,
+      "topic": [
+        "AAAADwAAAAh0cmFuc2Zlcg==",
+        "AAAAAwAAAAA="
+      ],
+      "value": "AAAAAwAAAGQ="
+    }
+  ],
+  "latestLedger": 1050,
+  "oldestLedger": 950,
+  "cursor": "0000001002-0000000001"
+}

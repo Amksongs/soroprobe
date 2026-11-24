@@ -176,6 +176,18 @@ footprint
 simulated against ledger 4014077
 ```
 
+**Pass an argument:**
+
+```bash
+soroprobe simulate CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC balance \
+  addr:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+```
+
+Every argument takes the same `type:value` form, so `addr:` is encoded as a
+Soroban `Address`. This placeholder account holds none of the asset, so the
+returned balance is `0`. All the supported types are under
+[Argument encoding](#argument-encoding).
+
 **Inspect its state health:**
 
 ```bash
@@ -219,6 +231,25 @@ liveUntilLedgerSeq >= currentLedgerSeq
 
 so the remaining lifetime, in ledgers, is `liveUntilLedgerSeq - currentLedgerSeq`.
 Zero means it expires with the current ledger. Negative means it already has.
+
+**Example.** An abbreviated `getLedgerEntries` response for an instance entry:
+
+```json
+{
+  "entries": [
+    {
+      "liveUntilLedgerSeq": 4073187,
+      "lastModifiedLedgerSeq": 4014103
+    }
+  ],
+  "latestLedger": 4014275
+}
+```
+
+At ledger 4014275 that entry has `4073187 - 4014275 = 58912` ledgers left
+(about 3.4 days at five seconds per ledger). That is below the default warning
+threshold of 120960 and above the critical one of 17280, so it is reported as
+**warning**: still live, but due for an extension.
 
 **What expiry costs depends on durability, and the difference matters:**
 

@@ -308,6 +308,18 @@ restoration; it does not perform one.
 
 ## CLI reference
 
+Every command prints its own arguments, flags and the [global flags](#global-flags)
+with `--help`. Reading help never contacts the network:
+
+```
+$ soroprobe inspect --help
+Read a contract's instance and code entries, and report how close each is to
+expiring.
+…
+Usage:
+  soroprobe inspect <contract-id> [flags]
+```
+
 ### `soroprobe simulate <contract-id> <function> [args...]` or `simulate --file <calls.json>`
 
 Builds an invocation, simulates it, and reports the outcome, decoded return
@@ -913,6 +925,24 @@ entries, and expired entries are dropped on read.
 `--log-level`, `--log-format`, `--timeout`, `--warn-ledgers`,
 `--critical-ledgers`, `--sorovault-url`.
 
+They apply to every command and can go before or after it. This inspects the
+testnet native-asset contract against an explicit endpoint, with a 30-second
+RPC timeout and a wider warning threshold:
+
+```bash
+soroprobe inspect CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+  --rpc-url https://soroban-testnet.stellar.org \
+  --network-passphrase "Test SDF Network ; September 2015" \
+  --timeout 30s --warn-ledgers 200000 --json | jq '.instance.thresholds'
+```
+
+```json
+{
+  "warn": 200000,
+  "critical": 17280
+}
+```
+
 ## Argument encoding
 
 Arguments use a `type:value` form:
@@ -938,6 +968,33 @@ soroprobe simulate CDLZ... transfer \
 | `vec` | `vec:["u32:1","u32:2"]`, `vec:[1, 2]` |
 | `map` | `map:[["sym:a","u32:1"],["sym:b","u32:2"]]` |
 
+A runnable version against the public testnet: it simulates a transfer of
+10000000 base units from the testnet friendbot account (funded, so the call
+succeeds) to the native-asset contract. Nothing is submitted. The
+`authorizations` section prints the arguments as they were encoded:
+
+```
+$ soroprobe simulate CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC transfer \
+    addr:GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR \
+    addr:CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+    i128:10000000
+…
+SUCCESS  the call would succeed
+…
+authorizations
+  GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR
+    CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC::transfer("GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR", "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC", "10000000")
+…
+```
+
+An argument that does not parse is rejected before any request is sent, and
+the error names its position (counted from 0):
+
+```
+$ soroprobe simulate CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC decimals u32:abc
+error: arg 0: argument "u32:abc": expected a base-10 integer, got "abc"
+```
+
 ### Token amounts
 
 Token functions take amounts in **base units**, so 10 XLM-equivalent of a
@@ -962,6 +1019,28 @@ integer arithmetic, never with floating point, so no amount is ever off by a
 rounding error. An amount with more fractional digits than the token has
 decimals — `i128:10.12345@2` — is **rejected** rather than rounded, because a
 rounded amount is a different amount. Negative amounts and zero work.
+
+To see the conversion, simulate a 10.5-token transfer of the testnet native
+asset (7 decimals) and read the encoded amount back from the authorization it
+requires (`auth` in `--json` output):
+
+```
+$ soroprobe simulate CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC transfer \
+    addr:GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR \
+    addr:CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+    i128:10.5@7 --json | jq -r '.auth[0].root_invocation.args[2]'
+105000000
+```
+
+Too many fractional digits fail before anything is simulated:
+
+```
+$ soroprobe simulate CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC transfer \
+    addr:GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR \
+    addr:CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+    i128:10.12345@2
+error: arg 2: argument "i128:10.12345@2": amount "10.12345@2" has 5 fractional digits but the token has 2 decimals, so it cannot be represented exactly
+```
 
 The scale is part of the argument, so it needs a type prefix: a bare `10.5@7`
 is not an amount, it is a string.

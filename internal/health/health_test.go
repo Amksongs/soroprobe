@@ -1,10 +1,12 @@
 package health_test
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/soroworks/soroprobe/internal/health"
 )
@@ -187,4 +189,28 @@ func TestWorst(t *testing.T) {
 			assert.Equal(t, tt.want, health.Worst(tt.in...))
 		})
 	}
+}
+
+func TestTTLMarshalsAndUnmarshals(t *testing.T) {
+	t.Parallel()
+
+	liveUntil := uint32(4_050_000)
+	// EstimatedTimeLeft is derived from LedgersRemaining and deliberately not
+	// serialized, so it stays zero on both sides of the round trip.
+	original := health.TTL{
+		Present:          true,
+		LiveUntilLedger:  &liveUntil,
+		CurrentLedger:    4_000_000,
+		LedgersRemaining: 50_000,
+		Durability:       health.DurabilityTemporary,
+		Status:           health.StatusWarning,
+	}
+
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	var decoded health.TTL
+	require.NoError(t, json.Unmarshal(data, &decoded))
+
+	assert.Equal(t, original, decoded)
 }

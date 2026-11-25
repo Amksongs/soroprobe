@@ -723,3 +723,47 @@ func TestLoggerHonoursLogLevel(t *testing.T) {
 	assert.NotContains(t, buf.String(), "suppressed")
 	assert.Contains(t, buf.String(), "kept")
 }
+
+func TestConfigMarshalsAndUnmarshals(t *testing.T) {
+	t.Parallel()
+
+	// Every serialized field carries a distinct non-zero value, so a wrong tag
+	// or type cannot hide behind a zero. CORSOrigins, APIToken and
+	// SoroForgeToken are json:"-" by design — they are secrets or
+	// environment-only settings — so they stay unset and take no part in the
+	// comparison.
+	warn := uint32(700)
+	critical := uint32(70)
+	original := config.Config{
+		RPCURL:                 "https://rpc.example.org",
+		NetworkPassphrase:      "Example Network ; 2026",
+		SourceAccount:          config.DefaultSourceAccount,
+		HTTPAddr:               "127.0.0.1:9090",
+		HTTPRateLimitPerMinute: 120,
+		HTTPRateLimitBurst:     20,
+		HTTPTrustForwardedFor:  true,
+		HTTPTLSCert:            "/etc/soroprobe/cert.pem",
+		HTTPTLSKey:             "/etc/soroprobe/key.pem",
+		LogLevel:               "debug",
+		LogFormat:              "json",
+		Timeout:                45 * time.Second,
+		WarnLedgers:            1_000,
+		CriticalLedgers:        100,
+		ThresholdOverrides: health.ThresholdOverrides{
+			Instance: &health.ThresholdOverride{Warn: &warn},
+			Code:     &health.ThresholdOverride{Critical: &critical},
+			Data:     &health.ThresholdOverride{Warn: &warn, Critical: &critical},
+		},
+		SoroVaultURL:    "http://sorovault.example.org",
+		InspectCacheTTL: 4 * time.Second,
+		BaseFee:         200,
+	}
+
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	var decoded config.Config
+	require.NoError(t, json.Unmarshal(data, &decoded))
+
+	assert.Equal(t, original, decoded)
+}

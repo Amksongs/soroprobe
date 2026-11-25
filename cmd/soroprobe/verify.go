@@ -256,6 +256,9 @@ func renderVerify(w io.Writer, r verifyReport) error {
 // toolchain.
 type gitDockerBuilder struct{}
 
+// Build clones the request's repository at its revision and rebuilds it inside
+// the request's container image, returning the toolchain it used and every
+// .wasm artifact the build produced.
 func (gitDockerBuilder) Build(ctx context.Context, req buildRequest) (*buildResult, error) {
 	dir, err := os.MkdirTemp("", "soroprobe-verify-")
 	if err != nil {

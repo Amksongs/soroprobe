@@ -3,7 +3,9 @@ package abi_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,8 +13,40 @@ import (
 
 	"github.com/soroworks/soroprobe/internal/abi"
 	"github.com/soroworks/soroprobe/internal/abi/abitest"
+	"github.com/soroworks/soroprobe/internal/stellar"
 	"github.com/soroworks/soroprobe/internal/stellar/stellartest"
 )
+
+// ExampleParseWasm decodes the interface a contract carries in the
+// contractspecv0 section of its Wasm.
+func ExampleParseWasm() {
+	// A minimal module whose contractspecv0 section declares
+	// fn decimals() -> u32.
+	const module = "0061736d01000000002f0e636f6e7472616374737065637630000000000000000000000008646563696d616c73000000000000000100000004"
+	wasm, err := hex.DecodeString(module)
+	if err != nil {
+		panic(err)
+	}
+
+	iface, err := abi.ParseWasm(wasm)
+	if err != nil {
+		panic(err)
+	}
+	for _, fn := range iface.Functions {
+		fmt.Println(fn.Signature())
+	}
+	// Output: fn decimals() -> u32
+}
+
+// ExampleNewChainSource builds an interface source over a Stellar RPC client.
+// The client is only consulted for a well-formed contract ID, so a malformed
+// one is reported before any request is made.
+func ExampleNewChainSource() {
+	source := abi.NewChainSource(struct{ stellar.Client }{})
+	_, err := source.Interface(context.Background(), "testnet", "not-a-contract")
+	fmt.Println(strings.HasPrefix(err.Error(), "invalid contract id"))
+	// Output: true
+}
 
 func TestChainSourceDecodesRealWasmFixtureAndCachesByHash(t *testing.T) {
 	t.Parallel()

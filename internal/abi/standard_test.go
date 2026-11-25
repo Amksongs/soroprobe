@@ -1,6 +1,8 @@
 package abi_test
 
 import (
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,6 +31,30 @@ func conformingToken(t *testing.T) *abi.Interface {
 		iface.Functions = append(iface.Functions, f)
 	}
 	return iface
+}
+
+func TestStandardNames(t *testing.T) {
+	t.Parallel()
+
+	t.Run("returns the supported names sorted", func(t *testing.T) {
+		t.Parallel()
+
+		names := abi.StandardNames()
+		require.NotEmpty(t, names)
+		assert.Contains(t, names, "sep41")
+		assert.True(t, sort.StringsAreSorted(names), "names are sorted: %v", names)
+		assert.Equal(t, names, abi.StandardNames(), "the result is stable")
+	})
+
+	t.Run("the error path lists every supported name", func(t *testing.T) {
+		t.Parallel()
+
+		// A typo must be a one-step fix, so the error quotes every name
+		// StandardNames returns.
+		_, err := abi.LookupStandard("not-a-standard")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), strings.Join(abi.StandardNames(), ", "))
+	})
 }
 
 func TestLookupStandard(t *testing.T) {

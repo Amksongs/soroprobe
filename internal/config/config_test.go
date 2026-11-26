@@ -668,6 +668,13 @@ func TestParseLogFormat(t *testing.T) {
 	assert.Contains(t, err.Error(), "json")
 }
 
+func BenchmarkParseLogFormat(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = config.ParseLogFormat("json")
+	}
+}
+
 func TestLoggerJSONEmitsParseableLines(t *testing.T) {
 	// The point of JSON mode is that a CI log aggregator can filter on
 	// fields — contract, status — instead of regex-parsing the text handler's

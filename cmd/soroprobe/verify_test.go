@@ -143,6 +143,56 @@ func TestVerifyPrefersSourceRevOverCommitHash(t *testing.T) {
 	assert.Equal(t, "from-rev", b.got[0].Rev)
 }
 
+func TestResolveBuildEdgeCases(t *testing.T) {
+	tests := []struct {
+		name      string
+		meta      map[string]string
+		source    string
+		rev       string
+		image     string
+		want      buildRequest
+		wantError string
+	}{
+		{
+			name:      "empty metadata",
+			meta:      map[string]string{},
+			wantError: "no source repository",
+		},
+		{
+			name: "commit hash fallback",
+			meta: map[string]string{
+				"source_repo": repoURL,
+				"commit_hash": "abc123",
+				"bldimg":      pinnedImage,
+			},
+			want: buildRequest{Source: repoURL, Rev: "abc123", Image: pinnedImage},
+		},
+		{
+			name: "option-like metadata",
+			meta: map[string]string{
+				"source_repo": "--upload-pack=evil",
+				"commit_hash": "abc123",
+				"bldimg":      pinnedImage,
+			},
+			wantError: "looks like an option",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveBuild(tt.meta, tt.source, tt.rev, tt.image)
+			if tt.wantError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantError)
+				assert.Empty(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestVerifyJSON(t *testing.T) {
 	fake := stellartest.NewFake(t)
 	hash := deployed(t, fake, fullMeta()...)

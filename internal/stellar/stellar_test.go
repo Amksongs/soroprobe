@@ -100,6 +100,25 @@ func TestDataKeyDurabilityChangesTheKey(t *testing.T) {
 	assert.NotEqual(t, persistent, temporary)
 }
 
+// benchmarkKey keeps the key built by BenchmarkDataKey observable, so the
+// compiler cannot optimize the call away.
+var benchmarkKey xdr.LedgerKey
+
+func BenchmarkDataKey(b *testing.B) {
+	addr, err := stellar.ParseContractID(testContract)
+	if err != nil {
+		b.Fatalf("parse contract id: %v", err)
+	}
+
+	sym := xdr.ScSymbol("Balance")
+	val := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		benchmarkKey = stellar.DataKey(addr, val, xdr.ContractDataDurabilityPersistent)
+	}
+}
+
 func TestCodeKey(t *testing.T) {
 	t.Parallel()
 

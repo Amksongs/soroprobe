@@ -217,3 +217,32 @@ func TestParseMetaEdgeCases(t *testing.T) {
 		})
 	}
 }
+
+func ExampleParseMeta() {
+	// A Wasm module carrying a contractmetav0 custom section.
+	wasm := []byte{
+		0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+		0x00, 0x6b, 0x0e,
+		'c', 'o', 'n', 't', 'r', 'a', 'c', 't', 'm', 'e', 't', 'a', 'v', '0',
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x05, 'r', 's', 'v', 'e', 'r', 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x06, '1', '.', '9', '1', '.', '0', 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x0b, 's', 'o', 'u', 'r', 'c', 'e', '_', 'r', 'e', 'p', 'o', 0x00,
+		0x00, 0x00, 0x00, 0x26,
+		'h', 't', 't', 'p', 's', ':', '/', '/', 'g', 'i', 't', 'h', 'u', 'b', '.', 'c', 'o', 'm', '/', 's', 'o', 'r', 'o', 'w', 'o', 'r', 'k', 's', '/', 's', 'o', 'r', 'o', 'p', 'r', 'o', 'b', 'e', 0x00, 0x00,
+	}
+
+	meta, err := abi.ParseMeta(wasm)
+	if err != nil {
+		fmt.Printf("parse error: %v\n", err)
+		return
+	}
+
+	fmt.Println("rsver:", meta["rsver"])
+	fmt.Println("source_repo:", meta["source_repo"])
+
+	// Output:
+	// rsver: 1.91.0
+	// source_repo: https://github.com/soroworks/soroprobe
+}

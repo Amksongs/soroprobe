@@ -231,9 +231,86 @@ func TestNewSoroVaultValidatesURL(t *testing.T) {
 	}
 }
 
+func TestNewSoroVaultEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	t.Run("invalid input is rejected", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name string
+			url  string
+		}{
+			{"whitespace only", "   "},
+			{"scheme without host", "https://"},
+			{"unsupported scheme", "file:///etc/passwd"},
+			{"malformed url", "http://[::1"},
+			{"control character", "http://vault\x7f.example"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				src, err := abi.NewSoroVault(tt.url, nil, 0)
+				require.Error(t, err)
+				assert.Nil(t, src)
+			})
+		}
+	})
+
+	t.Run("base path and trailing slashes are normalized", func(t *testing.T) {
+		t.Parallel()
+		tests := []struct {
+			name     string
+			suffix   string
+			wantPath string
+		}{
+			{"no suffix", "", "/api/contracts/" + contract},
+			{"many trailing slashes", "///", "/api/contracts/" + contract},
+			{"path prefix", "/vault/", "/vault/api/contracts/" + contract},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				var gotPath string
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					gotPath = r.URL.Path
+					_, _ = w.Write([]byte(`{"contract_id":"` + contract + `","interface":{"functions":[]}}`))
+				}))
+				defer srv.Close()
+
+				src, err := abi.NewSoroVault(srv.URL+tt.suffix, nil, 0)
+				require.NoError(t, err)
+				_, err = src.Interface(context.Background(), "", contract)
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantPath, gotPath)
+			})
+		}
+	})
+}
+
 func TestNetworkName(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "testnet", abi.NetworkName("Test SDF Network ; September 2015"))
 	assert.Equal(t, "public", abi.NetworkName("Public Global Stellar Network ; September 2015"))
 	assert.Equal(t, "Standalone Network ; February 2017", abi.NetworkName("Standalone Network ; February 2017"))
+}
+
+func TestNetworkNameEdgeCases(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		passphrase string
+		want       string
+	}{
+		{"empty input passes through", "", ""},
+		{"futurenet", "Test SDF Future Network ; October 2022", "futurenet"},
+		{"match is case sensitive", "test sdf network ; september 2015", "test sdf network ; september 2015"},
+		{"surrounding whitespace is not trimmed", " Test SDF Network ; September 2015 ", " Test SDF Network ; September 2015 "},
+		{"prefix of a known passphrase is not a match", "Public Global Stellar Network", "Public Global Stellar Network"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, abi.NetworkName(tc.passphrase))
+		})
+	}
 }

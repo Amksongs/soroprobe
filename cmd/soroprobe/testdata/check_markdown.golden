@@ -1,0 +1,5 @@
+Contract: C\|\`token | Result: **FAIL**
+
+| Check | Verdict | Details |
+| --- | --- | --- |
+| instance_ttl | FAIL | expired \| restore \`now\`<br>second line |

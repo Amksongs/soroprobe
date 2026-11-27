@@ -1,0 +1,26 @@
+// SoroProbe's dev container: one click in VS Code ("Dev Containers: Reopen
+// in Container") or a GitHub Codespace, with no local setup.
+//
+// SoroProbe needs no database and no services, so a single-container
+// definition is enough. Inside it, `make check` (gofmt, go vet, the full
+// offline test suite) works immediately.
+{
+  "name": "SoroProbe",
+  // Go matches CI: .github/workflows/ci.yml installs Go 1.26 on every job,
+  // and go.mod requires 1.25 or newer (the Stellar SDK), so 1.26 satisfies
+  // both without relying on GOTOOLCHAIN to fetch another toolchain.
+  "image": "mcr.microsoft.com/devcontainers/go:1.26-bookworm",
+
+  "features": {
+    // The image already ships Go 1.26 and a golangci-lint; the feature is
+    // pinned here so golangci-lint is the same release CI runs (v2.13.2 in
+    // ci.yml, matching GOLANGCI_LINT_VERSION in the Makefile) instead of
+    // whatever "latest" was when the image was built. It also installs the
+    // Go toolchain (no-op against this image), gopls, delve and the C
+    // toolchain `make` and cgo builds expect.
+    "ghcr.io/devcontainers/features/go:1": {
+      "version": "1.26",
+      "golangciLintVersion": "2.13.2"
+    }
+  }
+}

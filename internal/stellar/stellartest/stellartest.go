@@ -12,11 +12,14 @@ package stellartest
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -42,6 +45,12 @@ const (
 	// ExtendFootprintTTL is the subject name of a transaction that extends
 	// the TTL of a ledger entry rather than invoking a contract function.
 	ExtendFootprintTTL = "extend_footprint_ttl"
+	// PersistentDataKey is the SAC balance entry recorded in
+	// ledger_entries_data_durability.json, stored with persistent durability.
+	PersistentDataKey = `vec:["sym:Balance","addr:CBXZBQ6NW3TGPGLTR4JCG2VPVWFLCCHKDW75NJIXYXV7CJLNUO64VTFC"]`
+	// TemporaryDataKey is the SAC allowance entry recorded in the same
+	// fixture, stored with temporary durability.
+	TemporaryDataKey = `vec:["sym:Allowance","map:[[\"sym:from\",\"addr:GB32JP5GNOQLW4NUMV6H2UBOSMB4DROL7YNDBWAHYXMVFLLJOH3LXKHK\"],[\"sym:spender\",\"addr:CA6P26K4QNNIMTYP22ILTSCXQQDEKNWJIZJPC34YEZYOLBNT7YUPX7XS\"]]"]`
 )
 
 // Load decodes a fixture file into v.
@@ -94,9 +103,12 @@ type Fake struct {
 	// Simulations maps a contract function name to the response to return.
 	Simulations map[string]protocol.SimulateTransactionResponse
 	// SimulateErr, EntriesErr and LedgerErr inject transport failures.
-	SimulateErr error
-	EntriesErr  error
-	LedgerErr   error
+	SimulateErr           error
+	EntriesErr            error
+	LedgerErr             error
+	LedgersErr            error
+	LedgerCloseInterval   time.Duration
+	LatestLedgerCloseTime int64
 
 	// HealthErr and NetworkErr inject getHealth and getNetwork failures.
 	HealthErr  error
@@ -135,11 +147,14 @@ func NewFake(t testing.TB) *Fake {
 
 	latest := LoadLatestLedger(t)
 	f.LatestLedger = latest.Sequence
+	f.LatestLedgerCloseTime = latest.LedgerCloseTime
+	f.LedgerCloseInterval = 5 * time.Second
 
 	for _, name := range []string{
 		"ledger_entries_sac_instance.json",
 		"ledger_entries_wasm_instance.json",
 		"ledger_entries_wasm_code.json",
+		"ledger_entries_data_durability.json",
 	} {
 		resp := LoadLedgerEntries(t, name)
 		for _, entry := range resp.Entries {
@@ -153,6 +168,7 @@ func NewFake(t testing.TB) *Fake {
 
 	f.Simulations["decimals"] = LoadSimulate(t, "simulate_success.json")
 	f.Simulations["no_such_fn"] = LoadSimulate(t, "simulate_failure.json")
+	f.Simulations["transfer"] = LoadSimulate(t, "simulate_auth.json")
 	f.Simulations[ExtendFootprintTTL] = LoadSimulate(t, "simulate_extend.json")
 	return f
 }
@@ -207,7 +223,32 @@ func (f *Fake) GetLatestLedger(context.Context) (protocol.GetLatestLedgerRespons
 	if f.LedgerErr != nil {
 		return protocol.GetLatestLedgerResponse{}, f.LedgerErr
 	}
-	return protocol.GetLatestLedgerResponse{Sequence: f.LatestLedger, ProtocolVersion: 27}, nil
+	return protocol.GetLatestLedgerResponse{Sequence: f.LatestLedger, ProtocolVersion: 27, LedgerCloseTime: f.LatestLedgerCloseTime}, nil
+}
+
+// GetLedgers implements stellar.Client.
+func (f *Fake) GetLedgers(_ context.Context, req protocol.GetLedgersRequest) (protocol.GetLedgersResponse, error) {
+	if f.LedgersErr != nil {
+		return protocol.GetLedgersResponse{}, f.LedgersErr
+	}
+	limit := uint(20)
+	if req.Pagination != nil && req.Pagination.Limit > 0 {
+		limit = req.Pagination.Limit
+	}
+	interval := int64(f.LedgerCloseInterval / time.Second)
+	if interval <= 0 {
+		interval = 5
+	}
+	start := req.StartLedger
+	ledgers := make([]protocol.LedgerInfo, 0, limit)
+	for sequence := start; sequence <= f.LatestLedger && uint(len(ledgers)) < limit; sequence++ {
+		age := int64(f.LatestLedger - sequence)
+		ledgers = append(ledgers, protocol.LedgerInfo{
+			Sequence:        sequence,
+			LedgerCloseTime: f.LatestLedgerCloseTime - age*interval,
+		})
+	}
+	return protocol.GetLedgersResponse{Ledgers: ledgers, LatestLedger: f.LatestLedger}, nil
 }
 
 // GetNetwork implements stellar.Client.
@@ -320,4 +361,70 @@ func ArgsOf(envelope string) ([]xdr.ScVal, error) {
 		return nil, fmt.Errorf("host function is not invokeContract")
 	}
 	return args.Args, nil
+}
+
+// DeployWasm stores a Wasm-backed contract instance at contractID and a code
+// entry holding wasm, and returns the Wasm hash in hex. Both entries are live
+// for a long time, so a test sees healthy TTLs.
+func (f *Fake) DeployWasm(t testing.TB, contractID string, wasm []byte) string {
+	t.Helper()
+
+	contract, err := stellar.ParseContractID(contractID)
+	if err != nil {
+		t.Fatalf("parse contract id: %v", err)
+	}
+	hash := xdr.Hash(sha256.Sum256(wasm))
+	live := f.LatestLedger + 1_000_000
+
+	instance := xdr.ScContractInstance{
+		Executable: xdr.ContractExecutable{
+			Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+			WasmHash: &hash,
+		},
+	}
+	f.store(t, stellar.InstanceKey(contract), xdr.LedgerEntryData{
+		Type: xdr.LedgerEntryTypeContractData,
+		ContractData: &xdr.ContractDataEntry{
+			Contract:   contract,
+			Key:        xdr.ScVal{Type: xdr.ScValTypeScvLedgerKeyContractInstance},
+			Durability: xdr.ContractDataDurabilityPersistent,
+			Val:        xdr.ScVal{Type: xdr.ScValTypeScvContractInstance, Instance: &instance},
+		},
+	}, live)
+	f.store(t, stellar.CodeKey(hash), xdr.LedgerEntryData{
+		Type:         xdr.LedgerEntryTypeContractCode,
+		ContractCode: &xdr.ContractCodeEntry{Hash: hash, Code: wasm},
+	}, live)
+	return hex.EncodeToString(hash[:])
+}
+
+func (f *Fake) store(t testing.TB, key xdr.LedgerKey, data xdr.LedgerEntryData, liveUntil uint32) {
+	t.Helper()
+	keyXDR, err := stellar.EncodeKey(key)
+	if err != nil {
+		t.Fatalf("encode key: %v", err)
+	}
+	dataXDR, err := xdr.MarshalBase64(data)
+	if err != nil {
+		t.Fatalf("encode entry: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Entries[keyXDR] = protocol.LedgerEntryResult{KeyXDR: keyXDR, DataXDR: dataXDR, LiveUntilLedgerSeq: &liveUntil}
+}
+
+// StoreEntry stores an arbitrary ledger entry, live for a long time, so a
+// test can stage state the recorded fixtures do not contain.
+func (f *Fake) StoreEntry(t testing.TB, key xdr.LedgerKey, data xdr.LedgerEntryData) {
+	t.Helper()
+	f.store(t, key, data, f.LatestLedger+1_000_000)
+}
+
+// StoreAccount stores an account entry, so tests can drive balance, signer
+// and threshold checks.
+func (f *Fake) StoreAccount(t testing.TB, acc xdr.AccountEntry) {
+	t.Helper()
+	f.StoreEntry(t,
+		xdr.LedgerKey{Type: xdr.LedgerEntryTypeAccount, Account: &xdr.LedgerKeyAccount{AccountId: acc.AccountId}},
+		xdr.LedgerEntryData{Type: xdr.LedgerEntryTypeAccount, Account: &acc})
 }

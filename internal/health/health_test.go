@@ -1,10 +1,12 @@
 package health_test
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/soroworks/soroprobe/internal/health"
 )
@@ -56,6 +58,25 @@ func TestEvaluateConvertsLedgersToTime(t *testing.T) {
 	got := health.Evaluate(ptr(1_017_280), 1_000_000, health.DurabilityPersistent, health.DefaultThresholds)
 	assert.Equal(t, 24*time.Hour, got.EstimatedTimeLeft)
 	assert.Equal(t, int64(17_280), got.LedgersRemaining)
+}
+
+func TestEvaluateUsesMeasuredCloseTime(t *testing.T) {
+	t.Parallel()
+
+	got := health.EvaluateWithCloseTime(ptr(1_000_010), 1_000_000, health.DurabilityPersistent, health.DefaultThresholds, 4*time.Second)
+	assert.Equal(t, 40*time.Second, got.EstimatedTimeLeft)
+}
+
+func TestResolveThresholdsPerKindFallsBackIndependently(t *testing.T) {
+	t.Parallel()
+
+	warn := uint32(500)
+	global := health.Thresholds{Warn: 1000, Critical: 100}
+	got := health.ResolveThresholds(health.EntryKindInstance, global, health.ThresholdOverrides{
+		Instance: &health.ThresholdOverride{Warn: &warn},
+	})
+	assert.Equal(t, health.Thresholds{Warn: 500, Critical: 100}, got)
+	assert.Equal(t, global, health.ResolveThresholds(health.EntryKindCode, global, health.ThresholdOverrides{}))
 }
 
 func TestEvaluateExpiredHasNegativeTime(t *testing.T) {
@@ -168,4 +189,28 @@ func TestWorst(t *testing.T) {
 			assert.Equal(t, tt.want, health.Worst(tt.in...))
 		})
 	}
+}
+
+func TestTTLMarshalsAndUnmarshals(t *testing.T) {
+	t.Parallel()
+
+	liveUntil := uint32(4_050_000)
+	// EstimatedTimeLeft is derived from LedgersRemaining and deliberately not
+	// serialized, so it stays zero on both sides of the round trip.
+	original := health.TTL{
+		Present:          true,
+		LiveUntilLedger:  &liveUntil,
+		CurrentLedger:    4_000_000,
+		LedgersRemaining: 50_000,
+		Durability:       health.DurabilityTemporary,
+		Status:           health.StatusWarning,
+	}
+
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	var decoded health.TTL
+	require.NoError(t, json.Unmarshal(data, &decoded))
+
+	assert.Equal(t, original, decoded)
 }

@@ -7,6 +7,7 @@ on:
   # Lets the auto-merge bot re-run CI on main after it merges a PR.
   workflow_dispatch:
 
+# The build only reads the repository: check out, compile and test.
 permissions:
   contents: read
 
@@ -16,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@v7.1.0
         with:
           go-version: "1.26"
           cache: true
@@ -25,24 +26,39 @@ jobs:
       # Pinned deliberately: a new linter release can add findings, so an
       # upgrade should be its own reviewed change, not an unrelated red build.
       - name: Lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.2
           args: --timeout=5m
 
+  # Releases ship macOS and Windows binaries, so the build and test job runs
+  # on all three platforms. Terminal colour detection, config file paths and
+  # line endings in fixtures are all platform-sensitive; only a matrix catches
+  # a regression on the leg a contributor happens not to use.
   build:
-    runs-on: ubuntu-latest
+    name: build (${{ matrix.os }})
+    strategy:
+      # One red leg must not cancel the others: a Windows-only failure is
+      # exactly what this matrix exists to report.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: "1.26"
           cache: true
           # Always the newest patch release: security fixes land there.
           check-latest: true
 
+      # Windows runs `steps.run` in PowerShell by default, and these two
+      # checks are POSIX scripts. Naming bash keeps them identical on every
+      # leg of the matrix instead of forking them into a Windows variant.
       - name: Verify formatting
+        shell: bash
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
@@ -52,6 +68,7 @@ jobs:
           fi
 
       - name: Verify go.mod is tidy
+        shell: bash
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
@@ -63,5 +80,27 @@ jobs:
         run: go build ./...
 
       # The suite replays recorded fixtures and never reaches the network.
+      #
+      # The race detector needs cgo, which on Windows needs a MinGW-w64 C
+      # compiler and runtime (>= 8, per go.dev/doc/articles/race_detector) on
+      # the runner. Rather than make the Windows leg depend on whichever
+      # compiler happens to ship on the current image, that leg runs the plain
+      # suite and the Linux and macOS legs keep -race; the docs and the PR say
+      # which leg dropped it.
       - name: Test
+        if: runner.os != 'Windows'
         run: go test -race ./...
+
+      - name: Test (Windows, no race detector)
+        if: runner.os == 'Windows'
+        run: go test ./...
+
+  openapi-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Lint openapi.json
+        run: npx --yes @redocly/cli@2.60.0 lint --extends=minimal internal/api/openapi.json

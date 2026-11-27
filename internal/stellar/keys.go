@@ -64,6 +64,49 @@ func DataKey(contract xdr.ScAddress, key xdr.ScVal, durability xdr.ContractDataD
 
 // EncodeKey serializes a LedgerKey to the base64 form getLedgerEntries expects.
 func EncodeKey(key xdr.LedgerKey) (string, error) {
+	switch key.Type {
+	case xdr.LedgerEntryTypeAccount:
+		if key.Account == nil {
+			return "", fmt.Errorf("encode ledger key: account union value is nil")
+		}
+	case xdr.LedgerEntryTypeTrustline:
+		if key.TrustLine == nil {
+			return "", fmt.Errorf("encode ledger key: trustline union value is nil")
+		}
+	case xdr.LedgerEntryTypeOffer:
+		if key.Offer == nil {
+			return "", fmt.Errorf("encode ledger key: offer union value is nil")
+		}
+	case xdr.LedgerEntryTypeData:
+		if key.Data == nil {
+			return "", fmt.Errorf("encode ledger key: data union value is nil")
+		}
+	case xdr.LedgerEntryTypeClaimableBalance:
+		if key.ClaimableBalance == nil {
+			return "", fmt.Errorf("encode ledger key: claimable balance union value is nil")
+		}
+	case xdr.LedgerEntryTypeLiquidityPool:
+		if key.LiquidityPool == nil {
+			return "", fmt.Errorf("encode ledger key: liquidity pool union value is nil")
+		}
+	case xdr.LedgerEntryTypeContractData:
+		if key.ContractData == nil {
+			return "", fmt.Errorf("encode ledger key: contract data union value is nil")
+		}
+	case xdr.LedgerEntryTypeContractCode:
+		if key.ContractCode == nil {
+			return "", fmt.Errorf("encode ledger key: contract code union value is nil")
+		}
+	case xdr.LedgerEntryTypeConfigSetting:
+		if key.ConfigSetting == nil {
+			return "", fmt.Errorf("encode ledger key: config setting union value is nil")
+		}
+	case xdr.LedgerEntryTypeTtl:
+		if key.Ttl == nil {
+			return "", fmt.Errorf("encode ledger key: ttl union value is nil")
+		}
+	}
+
 	s, err := xdr.MarshalBase64(key)
 	if err != nil {
 		return "", fmt.Errorf("encode ledger key: %w", err)

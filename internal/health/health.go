@@ -107,16 +107,62 @@ func (d Durability) OnExpiry() string {
 	if d.Archivable() {
 		return "archived and restorable"
 	}
-	return "deleted permanently and not restorable"
+	return "deleted permanently and not restorable (gone permanently)"
 }
 
 // Thresholds define how much remaining TTL triggers a warning or a critical
 // result, measured in ledgers.
 type Thresholds struct {
 	// Warn is the remaining-ledger count at or below which an entry is a warning.
-	Warn uint32
+	Warn uint32 `json:"warn"`
 	// Critical is the remaining-ledger count at or below which an entry is critical.
-	Critical uint32
+	Critical uint32 `json:"critical"`
+}
+
+// ThresholdOverride replaces either global threshold for one entry kind.
+type ThresholdOverride struct {
+	Warn     *uint32 `json:"warn,omitempty"`
+	Critical *uint32 `json:"critical,omitempty"`
+}
+
+// ThresholdOverrides applies optional per-kind threshold values.
+type ThresholdOverrides struct {
+	Instance *ThresholdOverride `json:"instance,omitempty"`
+	Code     *ThresholdOverride `json:"code,omitempty"`
+	Data     *ThresholdOverride `json:"data,omitempty"`
+}
+
+// EntryKind identifies the ledger entry whose thresholds are resolved.
+type EntryKind string
+
+const (
+	EntryKindInstance EntryKind = "instance"
+	EntryKindCode     EntryKind = "code"
+	EntryKindData     EntryKind = "data"
+)
+
+// ResolveThresholds applies the per-kind values and falls back independently
+// to the corresponding global warning or critical threshold.
+func ResolveThresholds(kind EntryKind, global Thresholds, overrides ThresholdOverrides) Thresholds {
+	var override *ThresholdOverride
+	switch kind {
+	case EntryKindInstance:
+		override = overrides.Instance
+	case EntryKindCode:
+		override = overrides.Code
+	case EntryKindData:
+		override = overrides.Data
+	}
+	if override == nil {
+		return global
+	}
+	if override.Warn != nil {
+		global.Warn = *override.Warn
+	}
+	if override.Critical != nil {
+		global.Critical = *override.Critical
+	}
+	return global
 }
 
 // DefaultThresholds is roughly seven days for a warning and one day for
@@ -148,6 +194,15 @@ type TTL struct {
 // liveUntil may be nil, which yields StatusUnknown: the entry is present but
 // reported no TTL, so SoroProbe declines to guess.
 func Evaluate(liveUntil *uint32, currentLedger uint32, durability Durability, t Thresholds) TTL {
+	return EvaluateWithCloseTime(liveUntil, currentLedger, durability, t, LedgerCloseTime)
+}
+
+// EvaluateWithCloseTime classifies an entry and estimates its remaining time
+// using the measured average duration between ledgers.
+func EvaluateWithCloseTime(liveUntil *uint32, currentLedger uint32, durability Durability, t Thresholds, closeTime time.Duration) TTL {
+	if closeTime <= 0 {
+		closeTime = LedgerCloseTime
+	}
 	ttl := TTL{
 		Present:         true,
 		LiveUntilLedger: liveUntil,
@@ -162,7 +217,7 @@ func Evaluate(liveUntil *uint32, currentLedger uint32, durability Durability, t 
 
 	remaining := int64(*liveUntil) - int64(currentLedger)
 	ttl.LedgersRemaining = remaining
-	ttl.EstimatedTimeLeft = time.Duration(remaining) * LedgerCloseTime
+	ttl.EstimatedTimeLeft = time.Duration(remaining) * closeTime
 
 	switch {
 	case remaining < 0:

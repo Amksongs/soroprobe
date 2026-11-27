@@ -51,11 +51,11 @@ func TestQuietSuppressesTheSingleCheckReport(t *testing.T) {
 		{Name: "code_ttl", Outcome: probe.OutcomeFail, Detail: "expired"},
 	}}
 
-	cmd, opts := newRootCmd()
+	cmd, _ := newRootCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 
-	require.NoError(t, emitSingleCheckOutput(cmd, opts, result, true))
+	require.NoError(t, emitSingleCheckOutput(cmd, result, true, "text"))
 	assert.Empty(t, out.String(), "--quiet must print no report at all")
 }
 
@@ -66,11 +66,11 @@ func TestSingleCheckOutputPrintsWhenNotQuiet(t *testing.T) {
 		{Name: "deployed", Outcome: probe.OutcomePass, Detail: "found"},
 	}}
 
-	cmd, opts := newRootCmd()
+	cmd, _ := newRootCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 
-	require.NoError(t, emitSingleCheckOutput(cmd, opts, result, false))
+	require.NoError(t, emitSingleCheckOutput(cmd, result, false, "text"))
 	assert.Contains(t, out.String(), "CDLZ")
 }
 

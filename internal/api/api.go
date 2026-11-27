@@ -6,11 +6,20 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	_ "embed"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
+	"math"
+	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,10 +32,17 @@ import (
 
 // Server wraps the HTTP API.
 type Server struct {
-	prober *probe.Prober
-	addr   string
-	log    *slog.Logger
-	router chi.Router
+	prober            *probe.Prober
+	addr              string
+	log               *slog.Logger
+	router            chi.Router
+	ratePerSecond     float64
+	rateBurst         float64
+	trustForwardedFor bool
+	tlsCert           string
+	tlsKey            string
+	limitMu           sync.Mutex
+	clients           map[string]*clientBucket
 
 	// networkPassphrase is the network /readyz expects the RPC endpoint to
 	// serve.
@@ -54,6 +70,12 @@ type Options struct {
 	Logger *slog.Logger
 	// CORSOrigins is the exact-origin allow-list. Empty disables CORS.
 	CORSOrigins []string
+	// APIToken, when non-empty, requires "Authorization: Bearer <token>" on
+	// every /v1 route. /healthz stays open, so a liveness probe needs no
+	// credential. Empty keeps the API unauthenticated, exactly as before.
+	// The token must meet config.MinAPITokenLength; Config.Validate enforces
+	// that at startup.
+	APIToken string
 	// Timeout bounds a single request. Defaults to 60s.
 	Timeout time.Duration
 	// NetworkPassphrase is the network /readyz expects the RPC endpoint to
@@ -62,7 +84,12 @@ type Options struct {
 	NetworkPassphrase string
 	// ReadinessCacheTTL bounds how long a /readyz result is reused before
 	// the RPC endpoint is probed again. Defaults to 5s.
-	ReadinessCacheTTL time.Duration
+	ReadinessCacheTTL  time.Duration
+	RateLimitPerMinute uint32
+	RateLimitBurst     uint32
+	TrustForwardedFor  bool
+	TLSCert            string
+	TLSKey             string
 }
 
 // New builds a Server with its routes mounted.
@@ -75,6 +102,12 @@ func New(opts Options) *Server {
 	}
 	if opts.Timeout <= 0 {
 		opts.Timeout = 60 * time.Second
+	}
+	if opts.RateLimitPerMinute == 0 {
+		opts.RateLimitPerMinute = config.DefaultRateLimitPerMinute
+	}
+	if opts.RateLimitBurst == 0 {
+		opts.RateLimitBurst = config.DefaultRateLimitBurst
 	}
 	if opts.NetworkPassphrase == "" {
 		opts.NetworkPassphrase = config.DefaultNetworkPassphrase
@@ -89,6 +122,12 @@ func New(opts Options) *Server {
 		log:               opts.Logger,
 		networkPassphrase: opts.NetworkPassphrase,
 		readinessTTL:      opts.ReadinessCacheTTL,
+		ratePerSecond:     float64(opts.RateLimitPerMinute) / 60,
+		rateBurst:         float64(opts.RateLimitBurst),
+		trustForwardedFor: opts.TrustForwardedFor,
+		tlsCert:           opts.TLSCert,
+		tlsKey:            opts.TLSKey,
+		clients:           make(map[string]*clientBucket),
 	}
 
 	r := chi.NewRouter()
@@ -97,13 +136,20 @@ func New(opts Options) *Server {
 	r.Use(middleware.Timeout(opts.Timeout))
 	r.Use(nosniff)
 	r.Use(s.logRequests)
+	r.Use(s.rateLimit)
 	if len(opts.CORSOrigins) > 0 {
 		r.Use(cors(opts.CORSOrigins))
 	}
 
+	// /healthz stays outside the authenticated /v1 subtree on purpose: a
+	// liveness probe should not need a credential to prove the process is up.
 	r.Get("/healthz", s.handleLiveness)
+	r.Get("/openapi.json", s.handleOpenAPI)
 	r.Get("/readyz", s.handleReadiness)
 	r.Route("/v1", func(r chi.Router) {
+		if opts.APIToken != "" {
+			r.Use(requireToken(opts.APIToken))
+		}
 		// Answers reflect live on-chain state, so they must not be replayed
 		// from a shared or intermediary cache.
 		r.Use(noStore)
@@ -152,16 +198,46 @@ func (s *Server) Handler() http.Handler { return s.router }
 // ListenAndServe runs the server until ctx is canceled, then shuts it down
 // gracefully.
 func (s *Server) ListenAndServe(ctx context.Context) error {
+	if (s.tlsCert == "") != (s.tlsKey == "") {
+		return errors.New("TLS certificate and key must be configured together")
+	}
+	if s.tlsCert != "" {
+		if _, err := tls.LoadX509KeyPair(s.tlsCert, s.tlsKey); err != nil {
+			return fmt.Errorf("load TLS certificate and key: %w", err)
+		}
+	}
+
+	listener, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return err
+	}
+	return s.Serve(ctx, listener)
+}
+
+// Serve runs the server on listener until ctx is canceled, then shuts it down gracefully.
+func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 	srv := &http.Server{
-		Addr:              s.addr,
 		Handler:           s.router,
 		ReadHeaderTimeout: 10 * time.Second,
+	}
+	if s.tlsCert != "" {
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		s.log.Info("http api listening", "addr", s.addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		protocol := "http"
+		if s.tlsCert != "" {
+			protocol = "https"
+		}
+		s.log.Info(protocol+" api listening", "addr", listener.Addr())
+		var err error
+		if s.tlsCert == "" {
+			err = srv.Serve(listener)
+		} else {
+			err = srv.ServeTLS(listener, s.tlsCert, s.tlsKey)
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
 		}
@@ -170,13 +246,115 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 
 	select {
 	case err := <-errCh:
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		s.log.Info("shutting down http api")
-		return srv.Shutdown(shutdownCtx)
+		err := srv.Shutdown(shutdownCtx)
+		_ = listener.Close()
+		return err
 	}
+}
+
+const maxRateLimitClients = 10_000
+
+type clientBucket struct {
+	tokens    float64
+	capacity  float64
+	updatedAt time.Time
+	seenAt    time.Time
+}
+
+func (s *Server) rateLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v1/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		weight := 1.0
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/checks" {
+			body, _ := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+			r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(body), r.Body))
+			var batch struct {
+				Checks []json.RawMessage `json:"checks"`
+			}
+			if len(body) <= maxBodyBytes && json.Unmarshal(body, &batch) == nil &&
+				len(batch.Checks) > 1 && len(batch.Checks) <= maxAPIBatchChecks {
+				weight = float64(len(batch.Checks))
+			}
+		}
+
+		client := s.clientAddress(r)
+		retryAfter := s.takeTokens(client, weight, time.Now())
+		if retryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+			writeError(w, http.StatusTooManyRequests, errors.New("rate limit exceeded"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) clientAddress(r *http.Request) string {
+	if s.trustForwardedFor {
+		if forwarded := strings.TrimSpace(strings.SplitN(r.Header.Get("X-Forwarded-For"), ",", 2)[0]); net.ParseIP(forwarded) != nil {
+			return forwarded
+		}
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// takeTokens returns the whole-second delay needed before this request can pass.
+func (s *Server) takeTokens(client string, cost float64, now time.Time) int {
+	s.limitMu.Lock()
+	defer s.limitMu.Unlock()
+
+	bucket, ok := s.clients[client]
+	if !ok {
+		if len(s.clients) >= maxRateLimitClients {
+			s.evictOldestClient()
+		}
+		bucket = &clientBucket{tokens: s.rateBurst, capacity: s.rateBurst, updatedAt: now}
+		s.clients[client] = bucket
+	}
+	bucket.tokens = math.Min(bucket.capacity, bucket.tokens+now.Sub(bucket.updatedAt).Seconds()*s.ratePerSecond)
+	bucket.updatedAt = now
+	bucket.seenAt = now
+	if cost > bucket.capacity {
+		bucket.capacity = cost
+	}
+	if bucket.tokens < cost {
+		return int(math.Ceil((cost - bucket.tokens) / s.ratePerSecond))
+	}
+	bucket.tokens -= cost
+	return 0
+}
+
+func (s *Server) evictOldestClient() {
+	var oldestKey string
+	var oldest time.Time
+	for key, bucket := range s.clients {
+		if oldestKey == "" || bucket.seenAt.Before(oldest) {
+			oldestKey, oldest = key, bucket.seenAt
+		}
+	}
+	delete(s.clients, oldestKey)
+}
+
+//go:embed openapi.json
+var openAPISpec []byte
+
+func (s *Server) handleOpenAPI(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = w.Write(openAPISpec)
 }
 
 // nosniff stops a browser from reinterpreting a response as a type it did not

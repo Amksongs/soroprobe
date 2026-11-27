@@ -7,7 +7,10 @@ import (
 	"sync"
 	"time"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+
 	"github.com/soroworks/soroprobe/internal/health"
+	"github.com/soroworks/soroprobe/internal/stellar"
 )
 
 // MaxBatchChecks bounds a batch, so one API request cannot queue an
@@ -55,11 +58,15 @@ type BatchResult struct {
 	Items   []BatchItem `json:"items"`
 }
 
-// CheckBatch runs up to the requested number of checks and reports them in
-// input order. One check failing to run does not stop the others; its error is
-// recorded and the batch moves on. A check that outlives its own Timeout is
-// reported as one that could not be run. Only a malformed batch or a canceled
-// context returns a Go error.
+// CheckBatch runs every check and reports them in input order. One check
+// failing to run does not stop the others; its error is recorded and the batch
+// moves on. Only a malformed batch or a canceled context returns a Go error.
+//
+// A plain batch prefetches every check's ledger entries in as few
+// getLedgerEntries calls as the RPC allows and then runs the simulations in
+// order. A batch that asks for concurrency, or gives any check its own
+// Timeout, runs each check independently instead, so every check can be
+// bounded and scheduled on its own.
 func (p *Prober) CheckBatch(ctx context.Context, req BatchRequest) (*BatchResult, error) {
 	if err := validateBatch(req); err != nil {
 		return nil, err
@@ -67,7 +74,21 @@ func (p *Prober) CheckBatch(ctx context.Context, req BatchRequest) (*BatchResult
 	if req.Concurrency < 0 {
 		return nil, fmt.Errorf("%w: concurrency must not be negative", ErrInvalidBatch)
 	}
+	if req.Concurrency > 1 {
+		return p.checkBatchConcurrent(ctx, req)
+	}
+	for _, check := range req.Checks {
+		if check.Timeout != "" {
+			return p.checkBatchConcurrent(ctx, req)
+		}
+	}
+	return p.checkBatchPrefetched(ctx, req)
+}
 
+// checkBatchConcurrent runs up to req.Concurrency checks at once, each under
+// its own Timeout. A check that outlives its Timeout is reported as one that
+// could not be run.
+func (p *Prober) checkBatchConcurrent(ctx context.Context, req BatchRequest) (*BatchResult, error) {
 	concurrency := req.Concurrency
 	if concurrency == 0 {
 		concurrency = 1
@@ -134,6 +155,211 @@ func (p *Prober) CheckBatch(ctx context.Context, req BatchRequest) (*BatchResult
 		}
 	}
 	return out, nil
+}
+
+// Stellar RPC documents a maximum of 200 keys per getLedgerEntries request.
+const maxLedgerKeysPerRequest = 200
+
+type batchCheckState struct {
+	plan    *inspectPlan
+	codeKey string
+	err     error
+}
+
+type batchLedgerEntries struct {
+	entries map[string]protocol.LedgerEntryResult
+	latest  map[string]uint32
+	errors  map[string]error
+}
+
+func (p *Prober) checkBatchPrefetched(ctx context.Context, req BatchRequest) (*BatchResult, error) {
+	states := make([]batchCheckState, len(req.Checks))
+	initialKeys := make([]string, 0)
+	seen := make(map[string]struct{})
+	for i, check := range req.Checks {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		plan, err := p.planInspect(InspectRequest{
+			ContractID:     check.ContractID,
+			DataKeys:       check.DataKeys,
+			DataDurability: check.DataDurability,
+		})
+		if err != nil {
+			states[i].err = err
+			continue
+		}
+		states[i].plan = plan
+		for _, key := range plan.keys {
+			if _, ok := seen[key]; !ok {
+				seen[key] = struct{}{}
+				initialKeys = append(initialKeys, key)
+			}
+		}
+	}
+
+	initial := p.fetchBatchEntries(ctx, initialKeys)
+	codeKeys := make([]string, 0, len(req.Checks))
+	seen = make(map[string]struct{})
+	for i := range states {
+		state := &states[i]
+		if state.err != nil || state.plan == nil {
+			continue
+		}
+		for _, key := range state.plan.keys {
+			if err := initial.errors[key]; err != nil {
+				state.err = err
+				break
+			}
+		}
+		if state.err != nil {
+			continue
+		}
+		instance, ok := initial.entries[state.plan.instanceKey]
+		if !ok {
+			continue
+		}
+		partial := &InspectResult{}
+		wasmHash, err := p.readInstanceEntry(instance, partial)
+		if err != nil {
+			state.err = err
+			continue
+		}
+		if wasmHash == nil {
+			continue
+		}
+		state.codeKey, err = stellar.EncodeKey(stellar.CodeKey(*wasmHash))
+		if err != nil {
+			state.err = err
+			continue
+		}
+		if _, ok := seen[state.codeKey]; !ok {
+			seen[state.codeKey] = struct{}{}
+			codeKeys = append(codeKeys, state.codeKey)
+		}
+	}
+
+	code := p.fetchBatchEntries(ctx, codeKeys)
+	entries := make(map[string]protocol.LedgerEntryResult, len(initial.entries)+len(code.entries))
+	latest := make(map[string]uint32, len(initial.latest)+len(code.latest))
+	keyErrors := make(map[string]error, len(initial.errors)+len(code.errors))
+	for key, entry := range initial.entries {
+		entries[key] = entry
+	}
+	for key, ledger := range initial.latest {
+		latest[key] = ledger
+	}
+	for key, err := range initial.errors {
+		keyErrors[key] = err
+	}
+	for key, entry := range code.entries {
+		entries[key] = entry
+	}
+	for key, ledger := range code.latest {
+		latest[key] = ledger
+	}
+	for key, err := range code.errors {
+		keyErrors[key] = err
+	}
+	client := &cachedLedgerClient{Client: p.client, entries: entries, latest: latest, errors: keyErrors}
+	batchedProber := *p
+	batchedProber.client = client
+
+	out := &BatchResult{OK: true, Items: make([]BatchItem, 0, len(req.Checks))}
+	for i, check := range req.Checks {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		item := BatchItem{Name: checkName(check), ContractID: check.ContractID}
+		if states[i].err != nil {
+			item.Error = states[i].err.Error()
+			out.Errored = true
+			out.OK = false
+			out.Items = append(out.Items, item)
+			continue
+		}
+		if states[i].codeKey != "" {
+			if err := keyErrors[states[i].codeKey]; err != nil {
+				item.Error = err.Error()
+				out.Errored = true
+				out.OK = false
+				out.Items = append(out.Items, item)
+				continue
+			}
+		}
+		result, err := batchedProber.Check(ctx, check.CheckRequest)
+		if err != nil {
+			item.Error = err.Error()
+			out.Errored = true
+			out.OK = false
+		} else {
+			item.Result = result
+			if !result.OK {
+				out.OK = false
+			}
+		}
+		out.Items = append(out.Items, item)
+	}
+	return out, nil
+}
+
+func (p *Prober) fetchBatchEntries(ctx context.Context, keys []string) batchLedgerEntries {
+	result := batchLedgerEntries{
+		entries: make(map[string]protocol.LedgerEntryResult, len(keys)),
+		latest:  make(map[string]uint32, len(keys)),
+		errors:  make(map[string]error),
+	}
+	for start := 0; start < len(keys); start += maxLedgerKeysPerRequest {
+		if ctx.Err() != nil {
+			for _, key := range keys[start:] {
+				result.errors[key] = ctx.Err()
+			}
+			return result
+		}
+		end := min(start+maxLedgerKeysPerRequest, len(keys))
+		chunk := keys[start:end]
+		response, err := p.client.GetLedgerEntries(ctx, protocol.GetLedgerEntriesRequest{Keys: chunk})
+		if err != nil {
+			for _, key := range chunk {
+				result.errors[key] = err
+			}
+			continue
+		}
+		for _, key := range chunk {
+			result.latest[key] = response.LatestLedger
+		}
+		for _, entry := range response.Entries {
+			result.entries[entry.KeyXDR] = entry
+		}
+	}
+	return result
+}
+
+type cachedLedgerClient struct {
+	stellar.Client
+	entries map[string]protocol.LedgerEntryResult
+	latest  map[string]uint32
+	errors  map[string]error
+}
+
+func (c *cachedLedgerClient) GetLedgerEntries(_ context.Context, req protocol.GetLedgerEntriesRequest) (protocol.GetLedgerEntriesResponse, error) {
+	response := protocol.GetLedgerEntriesResponse{}
+	for _, key := range req.Keys {
+		if err := c.errors[key]; err != nil {
+			return response, err
+		}
+		ledger, ok := c.latest[key]
+		if !ok {
+			return response, fmt.Errorf("batch ledger entry %q was not prefetched", key)
+		}
+		if response.LatestLedger == 0 {
+			response.LatestLedger = ledger
+		}
+		if entry, ok := c.entries[key]; ok {
+			response.Entries = append(response.Entries, entry)
+		}
+	}
+	return response, nil
 }
 
 // checkTimeout parses the per-check time limit. Zero means no limit.

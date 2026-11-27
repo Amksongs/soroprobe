@@ -23,6 +23,9 @@ import (
 // unregistered contract is still a contract worth probing.
 var ErrUnknownContract = errors.New("abi: contract is not in the interface registry")
 
+// ErrNoWasm reports that a contract has no Wasm interface to decode.
+var ErrNoWasm = errors.New("abi: contract has no wasm interface")
+
 // ErrNoSuchFunction reports that the contract's interface does not export the
 // requested function. Unlike ErrUnknownContract this is a definite answer: a
 // simulation could only fail.
@@ -44,6 +47,13 @@ type Type struct {
 	// Key and Value are the halves of a map.
 	Key   *Type `json:"key,omitempty"`
 	Value *Type `json:"value,omitempty"`
+	// Elements are the item types of a tuple, in order.
+	Elements []Type `json:"elements,omitempty"`
+	// Ok and Err are the halves of a result.
+	Ok  *Type `json:"ok,omitempty"`
+	Err *Type `json:"err,omitempty"`
+	// Length is the byte length of a bytes_n.
+	Length uint32 `json:"length,omitempty"`
 }
 
 // Param is a named function input.
@@ -63,6 +73,10 @@ type Function struct {
 // Interface is the part of a contract interface Annotate needs.
 type Interface struct {
 	Functions []Function `json:"functions"`
+	// Types are the user-defined types the contract declares: structs,
+	// unions, enums and error enums. Only a Wasm-derived interface fills
+	// them in; they are what a structural comparison of two versions needs.
+	Types []UDT `json:"types,omitempty"`
 }
 
 // Lookup returns the named function, or an ErrNoSuchFunction error listing

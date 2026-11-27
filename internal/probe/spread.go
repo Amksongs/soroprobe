@@ -42,7 +42,7 @@ type SpreadReport struct {
 	Noisy bool `json:"noisy"`
 }
 
-// SpreadCost summarises the cost of repeated simulations.
+// SpreadCost summarizes the cost of repeated simulations.
 //
 // The statistics are a pure function of the costs and footprints observed, so
 // they can be exercised without a network or a prober. costs must hold at

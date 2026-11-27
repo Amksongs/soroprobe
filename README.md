@@ -51,6 +51,15 @@ only one of the two would have looked fine.
 - [Design](#design)
 - [What SoroProbe deliberately does not do](#what-soroprobe-deliberately-does-not-do)
 
+The same map is available from the binary itself, so you can jump straight to
+the command you need without scrolling:
+
+```bash
+soroprobe --help          # every command, one line of description each
+soroprobe help check      # the full reference for one command
+soroprobe help simulate
+```
+
 ## Versions this targets
 
 Soroban's simulation and state model change between protocol versions, so the
@@ -59,10 +68,20 @@ memory. Verified **2026-08-07**:
 
 | Component | Version | Notes |
 | --- | --- | --- |
-| Go SDK | `github.com/stellar/go-stellar-sdk` v0.7.1 | The former `github.com/stellar/go` is **deprecated and archived**; the Go tool itself reports `module github.com/stellar/go is deprecated: Use github.com/stellar/go-stellar-sdk instead`. |
+| Go SDK | `github.com/stellar/go-stellar-sdk` v0.8.0 | The former `github.com/stellar/go` is **deprecated and archived**; the Go tool itself reports `module github.com/stellar/go is deprecated: Use github.com/stellar/go-stellar-sdk instead`. |
 | Go | 1.25 | Required by the SDK. `GOTOOLCHAIN=auto` lets an older local `go` fetch it. |
 | Stellar RPC | `simulateTransaction`, `getLedgerEntries`, `getLatestLedger` | Accessed through the SDK's `clients/rpcclient`. |
 | Network | Testnet, **protocol 27** | Ledger close time measured at 5.00s/ledger over 19 consecutive ledgers. |
+
+Check the two versions you can read locally against that table:
+
+```bash
+$ go version
+go version go1.25.0 linux/amd64
+
+$ grep 'stellar/go-stellar-sdk' go.mod
+	github.com/stellar/go-stellar-sdk v0.8.0
+```
 
 Two details that commonly trip up code written against older docs:
 
@@ -107,6 +126,20 @@ docker compose up
 the environment (or a `.env` file); the defaults target the public testnet, so
 the stack comes up with no configuration at all.
 
+Confirm the install works before relying on it — neither command needs a
+configuration or a secret key, and the second should exit **0**:
+
+```bash
+$ soroprobe version
+v0.2.0      # a `make build` prints the commit it was built from instead
+
+$ soroprobe check CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC --fn decimals
+…
+result PASS
+$ echo $?
+0
+```
+
 If your local Go is older than 1.25, nothing needs to change: `GOTOOLCHAIN=auto`
 is Go's default and will fetch the right toolchain on first build.
 
@@ -142,6 +175,18 @@ footprint
 
 simulated against ledger 4014077
 ```
+
+**Pass an argument:**
+
+```bash
+soroprobe simulate CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC balance \
+  addr:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF
+```
+
+Every argument takes the same `type:value` form, so `addr:` is encoded as a
+Soroban `Address`. This placeholder account holds none of the asset, so the
+returned balance is `0`. All the supported types are under
+[Argument encoding](#argument-encoding).
 
 **Inspect its state health:**
 
@@ -187,6 +232,25 @@ liveUntilLedgerSeq >= currentLedgerSeq
 so the remaining lifetime, in ledgers, is `liveUntilLedgerSeq - currentLedgerSeq`.
 Zero means it expires with the current ledger. Negative means it already has.
 
+**Example.** An abbreviated `getLedgerEntries` response for an instance entry:
+
+```json
+{
+  "entries": [
+    {
+      "liveUntilLedgerSeq": 4073187,
+      "lastModifiedLedgerSeq": 4014103
+    }
+  ],
+  "latestLedger": 4014275
+}
+```
+
+At ledger 4014275 that entry has `4073187 - 4014275 = 58912` ledgers left
+(about 3.4 days at five seconds per ledger). That is below the default warning
+threshold of 120960 and above the critical one of 17280, so it is reported as
+**warning**: still live, but due for an extension.
+
 **What expiry costs depends on durability, and the difference matters:**
 
 | Storage | On expiry | Recoverable |
@@ -210,12 +274,19 @@ days" means something very different for a temporary entry than a persistent one
 | `missing` | No such entry exists on the ledger |
 | `unknown` | Entry exists but reported no TTL |
 
-Thresholds are configurable with `--warn-ledgers` and `--critical-ledgers`.
+Global thresholds are configurable with `--warn-ledgers` and
+`--critical-ledgers`. Optional instance, code and data thresholds override
+those values independently; each kind accepts `warn` and `critical` values.
+For example, use `--data-warn-ledgers` or `DATA_WARN_LEDGERS`. The config file
+uses a `thresholds` object with `instance`, `code` and `data` objects, each
+containing optional `warn` and `critical` ledger counts. Reports include the
+effective thresholds applied to every entry.
 
-**A note on the time estimates.** SoroProbe converts ledgers to wall-clock time
-at the network's five-second target close time, which measured exactly 5.00s
-when verified. Real close times drift slightly, so treat the **ledger count as
-authoritative** and the duration as a convenience.
+**A note on the time estimates.** SoroProbe measures the average close time of
+the 20 most recent ledgers and uses it to convert ledger counts to wall-clock
+time. If RPC cannot provide that measurement, it falls back to the five-second
+target and says so in the report. Treat the **ledger count as authoritative**
+and the duration as a convenience.
 
 **Three things worth knowing:**
 
@@ -236,6 +307,18 @@ entries, RPC returns a `restorePreamble`. SoroProbe surfaces this as
 restoration; it does not perform one.
 
 ## CLI reference
+
+Every command prints its own arguments, flags and the [global flags](#global-flags)
+with `--help`. Reading help never contacts the network:
+
+```
+$ soroprobe inspect --help
+Read a contract's instance and code entries, and report how close each is to
+expiring.
+…
+Usage:
+  soroprobe inspect <contract-id> [flags]
+```
 
 ### `soroprobe simulate <contract-id> <function> [args...]` or `simulate --file <calls.json>`
 
@@ -316,6 +399,21 @@ estimate cannot slip under the threshold by luck.
 
 Reads the contract's instance and code entries and reports expiration health.
 
+For a Stellar Asset Contract it also reports the asset behind it: the asset type,
+code and issuer, the contract's admin, and the issuer account's `AUTH_REQUIRED`,
+`AUTH_REVOCABLE` and `CLAWBACK` flags — the facts that decide whether a holder
+can be frozen or clawed back. If the issuer account is not on the ledger the
+report says so instead of guessing at flags. The same data is under `asset` in
+`--json` output and `GET /v1/inspect/{contract}`.
+
+```
+asset
+  type     credit_alphanum4
+  code     USDC
+  issuer   GA5Z…
+  flags    AUTH_REQUIRED, CLAWBACK
+```
+
 | Flag | Description |
 | --- | --- |
 | `--key <spec>` | A contract data key to inspect, in `type:value` form. Repeatable. |
@@ -388,10 +486,13 @@ Combined health check, designed for CI.
 | `--key <spec>` | A contract data key to include in the TTL check. Repeatable. |
 | `--key-file <path>` | A file listing data keys, one spec per line. Combined with `--key`. |
 | `--durability <d>` | Durability for `--key` lookups. |
+| `--from-soroforge <url>` | Read the contracts a [SoroForge](#checking-the-contracts-soroforge-tracks---from-soroforge) API tracks and check each. |
+| `--soroforge-token <token>` | Read-only SoroForge API token. Defaults to `SOROFORGE_API_TOKEN`. |
+| `--network <name>` | SoroForge network label for `--from-soroforge`. Defaults to the label for the configured passphrase. |
 | `--report <path>` | Also write the JSON result to this file, for a CI artifact. |
 
-Checks run in order: `deployed`, `instance_ttl`, `code_ttl`, any `data_ttl`, then
-`simulate`.
+Checks run in order: `deployed`, `instance_ttl`, `code_ttl`, `wasm_hash` (when a
+recorded hash is given), any `data_ttl`, then `simulate`.
 
 **Exit codes:**
 
@@ -439,7 +540,8 @@ result 1 passed, 1 failed, 0 could not run
 ```
 
 Each entry takes `name` (defaults to the contract ID, and must be unique),
-`contract_id`, `function`, `args`, `data_keys`, `data_durability` and `timeout`.
+`contract_id`, `function`, `args`, `data_keys`, `data_durability`,
+`expected_wasm_hash` and `timeout`.
 Unknown keys are rejected, so a typo cannot silently drop a step. Checks run one
 at a time by default to stay inside public RPC rate limits; `--concurrency N`
 runs up to N checks at once for endpoints that allow it. Results remain in file
@@ -469,16 +571,377 @@ functions from the ledger, and guessing a name would produce a failure that
 looks like a broken contract but is really a broken guess. Without `--fn` the
 simulation step is honestly reported as `SKIP`.
 
+#### Checking the contracts SoroForge tracks: `--from-soroforge`
+
+A check file lists contracts by hand, so it drifts: a contract deployed last
+week is missing, and one upgraded last month still appears healthy. When a team
+deploys with [SoroForge](https://github.com/soroworks/soroforge), its API already
+knows which contracts exist on a network and which Wasm hash was live when each
+change was confirmed, so SoroProbe can read that list instead:
+
+```bash
+export SOROFORGE_API_TOKEN=...   # a read-scoped token is enough
+soroprobe check --from-soroforge http://localhost:8080 --network testnet
+```
+
+```
+  PASS   token   instance_ttl: live for 58912 more ledgers (~3.4 days, …)
+  FAIL   vault   wasm_hash: drift: the registry recorded 9c1e… but the deployed code is 3f2a…
+
+result 1 passed, 1 failed, 0 could not run
+```
+
+SoroProbe reads `GET /v1/contracts?network=…`, following `has_more` (and
+`next_offset` when present) until every page has been read. `--network` names
+the SoroForge network label; it defaults to the label for the configured
+passphrase (`testnet`, `public` or `futurenet`), and the RPC endpoint must serve
+that same network. The alias SoroForge records is the name in the report.
+
+Each contract gets the usual checks plus `wasm_hash`, which compares the hash
+SoroForge recorded with the one the contract is actually running. A mismatch
+fails the check and prints both hashes: the catalog says one build is live and
+the chain says another. Stellar Asset Contracts have no code entry, so there the
+step is `SKIP` rather than an invented comparison. The same comparison is
+available per entry in `--file` as `expected_wasm_hash`.
+
+The token only needs the read scope. `--soroforge-token` overrides
+`SOROFORGE_API_TOKEN`. Authentication failures (401/403), an unknown network
+(400), rate limiting (429), a broken page of results and any other registry
+failure are **exit code 2**: no check ran, and a build must not pass on that. An
+empty list is exit 2 as well, because it usually means the wrong `--network`.
+`--quiet`, `--json`, `--format`, `--report`, `--check-timeout` and
+`--concurrency` work exactly as they do with `--file`.
+
+#### Verifying a token interface: `--standard`
+
+`check --standard sep41 <contract-id>` verifies that the contract exports the
+[SEP-41](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0041.md)
+token functions with the standard signatures. The interface is read from the
+contract's Wasm on chain (or from SoroVault when `--sorovault-url` is set).
+Argument names do not matter, only types: `Address` and `MuxedAddress` are the
+same kind.
+
+Each deviation — a missing function, a wrong argument count or type, a wrong
+return type — fails its own check named `standard:sep41:<function>`, so a CI log
+says exactly what is wrong. A contract with no deviations gets a single
+`standard:sep41` pass. `decimals`, `name` and `symbol` are also simulated, as
+`standard:sep41:<function>:simulate` checks: `decimals` must return a `u32` of at
+most 38 and `name` and `symbol` a non-empty string. Stellar Asset Contracts are
+implemented by the host and are skipped.
+
+```
+$ soroprobe check --standard sep41 C…
+  PASS  deployed               instance found, executable is wasm
+  FAIL  standard:sep41:burn    the function is not exported
+  PASS  standard:sep41:name:simulate  calling name returned "Token"
+```
+
+The same standard is available as `standard` in `--file` entries and as the
+`standard` query parameter of `GET /v1/check/{contract}`.
+
+#### Admin posture: `--admin-fn` and `--admin-key`
+
+Many contracts are controlled by one admin address, and what that address *is*
+is the most important fact about the contract's trust model. `--admin-fn admin`
+calls a zero-argument function that returns the admin; `--admin-key sym:Admin`
+reads it from instance storage (or, failing that, a persistent data entry)
+instead. The check named `admin` then reports:
+
+- for an **account**: its master weight, thresholds and signers. A single signer
+  with master weight is a `WARN`, prefixed `MAINNET:` on the public network;
+- for a **contract**: that it is a contract, and its Wasm hash;
+- an admin that cannot be resolved is a `FAIL`.
+
+#### Upgradeability: `--upgradeability`
+
+`check --upgradeability` answers "can this contract be changed under me?" in
+three checks, all **best effort**: the interface is searched for upgrade-like
+functions by name (`upgrade`, `update_current_contract_wasm`, `set_wasm`, anything
+containing `upgrade`), so a differently named upgrade function is not seen.
+
+- `upgradeability:interface` warns when such a function is exported.
+- `upgradeability:admin` names the admin that would have to call it: the one from
+  `--admin-fn`/`--admin-key`, else instance storage `Admin` or a zero-argument
+  `admin`, `get_admin` or `owner` function. It warns when an upgrade function is
+  exposed and no admin can be found.
+- `upgradeability:code_modified` gives the ledger the code entry was last written.
+
+Stellar Asset Contracts are host-implemented and skipped.
+
+#### Can the rent payer afford it: `--rent-payer`
+
+A TTL warning is only actionable if someone can pay to extend the entry.
+`check --rent-payer G… [--extend-ledgers N]` prices extending every entry that is
+running low (warning or critical) by `N` ledgers (default 518400, about 30 days)
+with the same simulation `inspect --estimate-extend` uses, and compares the total
+with the payer's **spendable** balance: its balance minus the minimum balance
+(`2 + subentries + sponsoring - sponsored` base reserves of 0.5 XLM) and selling
+liabilities. It is a `FAIL` when the balance falls short and a `WARN` when it
+would cover the cost with less than twice to spare. The sum is printed so it can
+be checked. Expired entries need a restore first and are not priced.
+
+```
+  WARN  rent_payer  affords the extension with less than twice the cost to spare: extending by 518400 ledgers costs about 0.0213 XLM (instance 0.0213 XLM); payer G… has 1.5213 XLM, minus 1 XLM reserve (2 base reserves of 0.5 XLM) and selling liabilities, leaving 0.5213 XLM spendable
+```
+
+### `soroprobe compat <old> <new>`
+
+Compares two versions of a contract's interface and fails on a breaking change,
+so an upgrade does not silently break the contracts and clients that call it.
+`<old>` is a contract ID (its Wasm is read from the ledger) or a `.wasm` file;
+`<new>` is the new `.wasm` file. Comparing two files needs no network.
+
+```
+$ soroprobe compat C… target/wasm32v1-none/release/token.wasm
+compat C… -> target/wasm32v1-none/release/token.wasm
+
+  BREAKING  fn transfer              argument 3 (amount) type changed from i128 to u64
+  ok        fn mint                  function added: fn mint(to: Address, amount: i128)
+  BREAKING  type Config              field fee type changed from u32 to u64
+
+result FAIL  2 breaking, 1 non-breaking
+```
+
+| Change | Breaking |
+| --- | --- |
+| Function removed, argument count or type changed, return type changed | yes |
+| Struct field removed, retyped or added | yes |
+| Enum or union case removed; enum value or union payload changed | yes |
+| Function added, argument renamed, enum or union case added | no |
+
+User-defined types are compared by structure, not by name, so renaming a type
+without changing its shape is not breaking, and struct fields are compared by
+name rather than position. Exit code 1 when anything is breaking; `--json`
+prints `{"old", "new", "breaking", "changes": [{"breaking", "subject", "detail"}]}`.
+
+### `soroprobe compare <contract-id> --testnet <profile> --mainnet <profile>`
+
+Compares the same contract on two configured networks, so a testnet
+deployment can be checked against mainnet before it ships.
+
+Each side's endpoint and passphrase come from a config profile. `--rpc-url`
+and `--network-passphrase` name exactly one network, so they cannot be used
+here; everything else — source account, thresholds, timeout — follows the usual
+precedence and is applied to both sides.
+
+```
+$ soroprobe compare CCLV… --testnet testnet --mainnet mainnet --fn decimals
+compare testnet vs mainnet
+
+contracts
+  testnet          CCLV77FY…
+  mainnet          CCLV77FY…
+
+wasm
+  testnet          8608bb30…
+  mainnet          8608bb30…
+  MATCH  the deployed Wasm is the same on both networks
+
+state entries
+  ENTRY              testnet                    mainnet                    VERDICT
+  instance           healthy (58912 ledgers)    warning (50210 ledgers)    DIFFERENT
+  code               healthy (24268 ledgers)    healthy (60110 ledgers)    MATCH
+
+read-only calls
+  CALL           testnet                    mainnet                    VERDICT
+  decimals       success, return 7          success, return 7          MATCH
+
+result MATCH  (1 other difference(s) highlighted above)
+```
+
+Three things are compared:
+
+- **Wasm.** Equal hashes mean the same build is deployed. Two Stellar Asset
+  Contracts count as a match, because the host implements both and there is no
+  Wasm entry to hash. This is the verdict the exit code reflects.
+- **State entry TTLs.** The instance, the code entry and any `--key` data
+  entries are read on both networks. Remaining ledger counts always differ
+  because the chains are at different heights, so a difference is highlighted
+  when the **health status** differs, not the raw count.
+- **Read-only calls.** `--fn` runs one call; `--calls <file>` runs several:
+
+  ```json
+  {"calls": [
+    {"name": "decimals", "function": "decimals"},
+    {"name": "symbol", "function": "symbol"}
+  ]}
+  ```
+
+  Each call's success and decoded return value are compared on both networks.
+  Unknown fields are rejected and call names must be unique.
+
+| Flag | Description |
+| --- | --- |
+| `--testnet <profile>` | Config profile for the first network. Required. |
+| `--mainnet <profile>` | Config profile for the second network. Required. |
+| `--testnet-contract <id>` | Contract id on the first network. Defaults to the positional id. |
+| `--mainnet-contract <id>` | Contract id on the second network. Defaults to the positional id. |
+| `--fn <name>` | Read-only function to simulate on both networks. |
+| `--arg <spec>` | Argument for `--fn`, in `type:value` form. Repeatable. |
+| `--calls <path>` | JSON file of calls to run on both networks (`-` reads stdin). |
+| `--key <spec>` | A data key whose TTL should be compared. Repeatable. |
+| `--key-file <path>` | A file listing data keys, combined with `--key`. |
+| `--durability <d>` | Durability for `--key` lookups: `persistent` (default) or `temporary`. |
+| `--format text\|json` | Output format. `--json` also selects JSON. |
+| `--report <path>` | Also write the JSON result to this file, for a CI artifact. |
+
+**Exit codes:** 0 when the Wasm hashes match, 1 when they do not (including
+when one side is not deployed), and 2 when SoroProbe could not run. TTL and call
+differences are highlighted but do not change the exit code: the verdict is
+about the code being the same deployment. Both profiles must resolve to a
+different RPC endpoint and network passphrase, so a comparison cannot silently
+probe the same network twice.
+
+The positional contract address is used on both networks unless overridden,
+which suits a deterministic deployment: a contract's address is derived from
+its deployer and salt, so the same deployment usually lands at the same address
+on both chains.
+
+### `soroprobe balance <token> <address>...`
+
+Reads a token's balances, formatted with the token's decimals and symbol, instead
+of simulating `balance` by hand and dividing by 10^decimals. `<token>` is a
+SEP-41 token or a Stellar Asset Contract; each address is an account (`G...`) or
+a contract (`C...`). `--file holders.txt` adds more addresses, one per line
+(`-` for stdin; blank lines and `#` comments are ignored).
+
+```
+$ soroprobe balance C…TOKEN G…ALICE G…BOB
+token C…TOKEN  USDC, 7 decimals
+
+  G…ALICE 12.5 USDC
+  G…BOB 0 USDC
+```
+
+`--json` prints `{"token", "symbol", "decimals", "balances": [{"address", "raw",
+"balance"}]}`; `raw` is the integer the contract returned, as a string. An
+address that cannot be read is reported with an `error` and the others still
+print; the exit code is then 1. Nothing is submitted and no key is needed.
+
+### `soroprobe verify <contract-id>`
+
+Rebuilds a contract from source and checks that the Wasm it produces is the Wasm
+the contract is running — the on-chain half of "is this deployment really that
+repository at that commit?".
+
+| Flag | Description |
+| --- | --- |
+| `--source <repo>` | Git repository to build. Defaults to the contract's `source_repo` metadata. |
+| `--rev <rev>` | Commit, tag or branch. Defaults to the contract's `source_rev`, else `commit_hash`, metadata. |
+| `--image <image>` | Container image to build in. Defaults to the contract's `bldimg` metadata. |
+
+There is **no default image**: a rebuild is only as trustworthy as its
+toolchain, so the image comes from the contract's own metadata or from you.
+Prefer one pinned by digest (`name@sha256:…`); the report says whether it was,
+because a tag can move and a later rebuild may use a different compiler.
+
+```
+$ soroprobe verify C… --image ghcr.io/example/builder@sha256:0123…
+contract C…
+deployed 8608bb30…
+
+  source     https://github.com/example/token
+  rev        abc123
+  image      ghcr.io/example/builder@sha256:0123…  pinned by digest
+  rustc      rustc 1.91.0
+  stellar    stellar 25.0.0
+
+built artifacts
+  MATCH     8608bb30…  target/wasm32v1-none/release/token.wasm
+
+result VERIFIED  the deployed Wasm was reproduced from source
+```
+
+It clones the repository and checks out `--rev`, then runs `rustc --version`,
+`stellar --version` and `stellar contract build` in the image with `docker`, and
+hashes every `target/**/release/*.wasm`. Exit code 0 when at least one artifact
+matches the deployed hash, 1 when none does; `--json` prints the report.
+Needs `git` and `docker` on the `PATH`. This is the one command that runs other
+programs, and the build executes whatever the image and repository contain, so
+only verify sources and images you trust. Values starting with `-` are rejected
+for `--source`, `--rev` and `--image`, and metadata read from the contract is
+held to the same rule.
+
+### Comparing footprints: `simulate --compare <contract2>` and `soroprobe diff <a.json> <b.json>`
+
+`--compare` simulates the same call on a second contract, such as a new version of the same code. `diff` compares two saved `simulate --json` reports. Both print:
+
+- ledger entries only one side touches
+- entries that moved between read-only and read-write
+- the change in each resource
+
+Entries are described in human terms: the instance, the code by hash, and data entries with their decoded key and durability. The called contract is named `self`, so two versions line up entry for entry. `--json` output is sorted and stable for CI.
+
+### `soroprobe sweep <contract> <function>`
+
+Simulates one function across many argument sets and prints a table of resources per sample, to see how cost scales before a user hits a limit.
+
+Samples come from `--args-file` (a JSON array of argument arrays or `{label, args}` objects) or from `--template` with `--sizes`:
+
+```
+soroprobe sweep C... process --template 'vec:[{repeat:"u32:7"}]' --sizes 1..64:8
+```
+
+In a template, `{n}` is the size and `{repeat:SPEC}` repeats SPEC n times. Simulations run at most `--concurrency` (default 4) at a time. Each row is judged against the network's per-transaction limits, and the output names the largest sample, in the order given, that succeeds within them.
+
+### Call trees: `simulate --trace`
+
+Prints the cross-contract call tree rebuilt from the simulation's `fn_call` and `fn_return` diagnostic events:
+
+```
+call trace
+  CCLV… swap(amount: 10, min_out: 9)
+    CDLZ… transfer(10)
+      -> null
+    -> 9
+```
+
+Each call shows its contract, function, decoded arguments (named from the contract's interface where it can be read) and return value. A contract error appears at the frame that raised it. `--json` emits the tree as nested objects under `trace`.
+
+### Prebuilt envelopes: `simulate --envelope <base64>`
+
+Simulates a transaction envelope exactly as a wallet or dApp built it (`--envelope-file`, `-` for stdin, reads it from a file). The call is decoded, and named from the target contract's interface when available, and the result, cost, footprint and authorizations are reported as usual.
+
+An envelope with more than one operation, or with an operation that runs no contract, is rejected with an explanation.
+
 ### `soroprobe serve`
 
 Runs the HTTP API. It binds `127.0.0.1:8080` by default; `--addr` overrides
-`HTTP_ADDR`.
+`HTTP_ADDR`. Set `API_TOKEN` (or `--api-token`) to require a bearer token on
+the `/v1` routes — see [Authentication](#authentication).
+
+`--inspect-cache-ttl` (env `INSPECT_CACHE_TTL`) lets the server reuse an inspect
+result for the same contract, durability and key set for that long. It is **off
+by default**: TTLs change at most once per ledger (about five seconds), so a
+cached answer can lag a ledger boundary, and on-demand computation keeps every
+response current. A value of `3s`–`5s` is reasonable for dashboards that poll
+the same contracts. A cached response still reports the ledger it was computed
+at in `latest_ledger`; simulations are never cached. The cache is bounded to 256
+entries, and expired entries are dropped on read.
 
 ### Global flags
 
-`--json`, `--config`, `--rpc-url`, `--network-passphrase`, `--source-account`,
-`--log-level`, `--timeout`, `--warn-ledgers`, `--critical-ledgers`,
-`--sorovault-url`.
+`--json`, `--config`, `--profile`, `--rpc-url`, `--network-passphrase`, `--source-account`,
+`--log-level`, `--log-format`, `--timeout`, `--warn-ledgers`,
+`--critical-ledgers`, `--sorovault-url`.
+
+They apply to every command and can go before or after it. This inspects the
+testnet native-asset contract against an explicit endpoint, with a 30-second
+RPC timeout and a wider warning threshold:
+
+```bash
+soroprobe inspect CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+  --rpc-url https://soroban-testnet.stellar.org \
+  --network-passphrase "Test SDF Network ; September 2015" \
+  --timeout 30s --warn-ledgers 200000 --json | jq '.instance.thresholds'
+```
+
+```json
+{
+  "warn": 200000,
+  "critical": 17280
+}
+```
 
 ## Argument encoding
 
@@ -505,6 +968,33 @@ soroprobe simulate CDLZ... transfer \
 | `vec` | `vec:["u32:1","u32:2"]`, `vec:[1, 2]` |
 | `map` | `map:[["sym:a","u32:1"],["sym:b","u32:2"]]` |
 
+A runnable version against the public testnet: it simulates a transfer of
+10000000 base units from the testnet friendbot account (funded, so the call
+succeeds) to the native-asset contract. Nothing is submitted. The
+`authorizations` section prints the arguments as they were encoded:
+
+```
+$ soroprobe simulate CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC transfer \
+    addr:GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR \
+    addr:CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+    i128:10000000
+…
+SUCCESS  the call would succeed
+…
+authorizations
+  GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR
+    CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC::transfer("GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR", "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC", "10000000")
+…
+```
+
+An argument that does not parse is rejected before any request is sent, and
+the error names its position (counted from 0):
+
+```
+$ soroprobe simulate CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC decimals u32:abc
+error: arg 0: argument "u32:abc": expected a base-10 integer, got "abc"
+```
+
 ### Token amounts
 
 Token functions take amounts in **base units**, so 10 XLM-equivalent of a
@@ -529,6 +1019,28 @@ integer arithmetic, never with floating point, so no amount is ever off by a
 rounding error. An amount with more fractional digits than the token has
 decimals — `i128:10.12345@2` — is **rejected** rather than rounded, because a
 rounded amount is a different amount. Negative amounts and zero work.
+
+To see the conversion, simulate a 10.5-token transfer of the testnet native
+asset (7 decimals) and read the encoded amount back from the authorization it
+requires (`auth` in `--json` output):
+
+```
+$ soroprobe simulate CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC transfer \
+    addr:GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR \
+    addr:CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+    i128:10.5@7 --json | jq -r '.auth[0].root_invocation.args[2]'
+105000000
+```
+
+Too many fractional digits fail before anything is simulated:
+
+```
+$ soroprobe simulate CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC transfer \
+    addr:GAIH3ULLFQ4DGSECF2AR555KZ4KNDGEKN4AFI4SU2M7B43MGK3QJZNSR \
+    addr:CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC \
+    i128:10.12345@2
+error: arg 2: argument "i128:10.12345@2": amount "10.12345@2" has 5 fractional digits but the token has 2 decimals, so it cannot be represented exactly
+```
 
 The scale is part of the argument, so it needs a type prefix: a bare `10.5@7`
 is not an amount, it is a string.
@@ -625,6 +1137,34 @@ Set `CORS_ORIGINS` to a comma-separated list of exact browser origins, such as
 `https://dashboard.example,https://admin.example`, to enable CORS. Unset means
 no CORS headers. Preflight requests are answered only for listed origins.
 
+### Authentication
+
+The API is unauthenticated by default, which is fine on a private network.
+Exposed more widely, anyone who can reach it can make it spend the operator's
+RPC quota — a paid provider, often — on arbitrary simulations. Set a token to
+stop that:
+
+```bash
+export API_TOKEN="$(openssl rand -hex 32)"
+soroprobe serve --addr 0.0.0.0:8080       # or: serve --api-token <token>
+```
+
+With a token set, every route under `/v1` requires
+`Authorization: Bearer <token>`; anything else is a **401** with a
+`WWW-Authenticate` header. `/healthz` never requires auth, so a liveness probe
+needs no credential. Unset keeps today's open behaviour. Two details are
+enforced rather than advised:
+
+- **Tokens shorter than 16 characters are rejected at startup.** A token short
+  enough to guess is not meaningfully different from no token at all.
+- **Comparison is constant-time**, so response timing cannot be used to
+  discover the token one character at a time.
+
+```bash
+curl -s -H "Authorization: Bearer $API_TOKEN" \
+  localhost:8080/v1/inspect/CDLZ… | jq
+```
+
 ### `GET /healthz`
 
 Liveness. Deliberately does **not** call out to the network, so the probe does
@@ -706,6 +1246,7 @@ run sequentially; split larger batches or use the CLI.
 | --- | --- |
 | 200 | The probe ran. **Read `success` / `ok` in the body for the verdict.** |
 | 400 | Bad input — malformed contract id, bad argument, unknown durability |
+| 401 | `API_TOKEN` is set and the bearer token is missing or wrong |
 | 404 | No such route |
 | 502 | Upstream RPC failed |
 | 503 | `/readyz` only: the RPC endpoint is unreachable, unhealthy, or on another network |
@@ -722,11 +1263,14 @@ pointed at the API cannot be tricked into interpreting a JSON body as HTML.
 Routes under `/v1` — and `GET /readyz` — also carry `Cache-Control: no-store`:
 their answers describe live on-chain state, and a cached health result would
 be worse than no result. `/healthz` is exempt — it holds no chain state and is
-meant to be polled cheaply.
+meant to be polled cheaply. The optional in-process inspect cache
+(`--inspect-cache-ttl`) is separate: it serves a recent answer for at most the
+configured few seconds and still reports the ledger it was computed at, but
+clients are never told to cache it.
 
 ## Configuration
 
-Precedence, lowest to highest: **defaults → config file → environment → flags**.
+Precedence, lowest to highest: **defaults → top-level config file keys → profile → environment → flags**.
 
 | Environment variable | Flag | Default |
 | --- | --- | --- |
@@ -735,12 +1279,30 @@ Precedence, lowest to highest: **defaults → config file → environment → fl
 | `SOURCE_ACCOUNT` | `--source-account` | all-zero placeholder |
 | `HTTP_ADDR` | `--addr` (on `serve`) | `127.0.0.1:8080` |
 | `CORS_ORIGINS` | — | unset; no CORS headers |
+| `API_TOKEN` | `--api-token` (on `serve`) | unset — `/v1` routes are open |
 | `LOG_LEVEL` | `--log-level` | `info` |
+| `LOG_FORMAT` | `--log-format` | `text` |
 | `RPC_TIMEOUT` | `--timeout` | `30s` |
+| `INSPECT_CACHE_TTL` | `--inspect-cache-ttl` (on `serve`) | `0s` (off) |
 | `WARN_LEDGERS` | `--warn-ledgers` | `120960` (≈7 days) |
 | `CRITICAL_LEDGERS` | `--critical-ledgers` | `17280` (≈1 day) |
+| `INSTANCE_WARN_LEDGERS`, `INSTANCE_CRITICAL_LEDGERS` | `--instance-warn-ledgers`, `--instance-critical-ledgers` | global thresholds |
+| `CODE_WARN_LEDGERS`, `CODE_CRITICAL_LEDGERS` | `--code-warn-ledgers`, `--code-critical-ledgers` | global thresholds |
+| `DATA_WARN_LEDGERS`, `DATA_CRITICAL_LEDGERS` | `--data-warn-ledgers`, `--data-critical-ledgers` | global thresholds |
 | `SOROVAULT_URL` | `--sorovault-url` | unset — [type arguments from SoroVault](#typing-arguments-from-sorovault) |
-| `SOROPROBE_CONFIG` | `--config` | `./soroprobe.json` if present |
+| `SOROFORGE_API_TOKEN` | `--soroforge-token` (on `check`) | unset — required by `--from-soroforge` |
+| `SOROPROBE_CONFIG` | `--config` | `./soroprobe.json` (then `./soroprobe.yaml`, `./soroprobe.yml`) if present |
+| `SOROPROBE_PROFILE` | `--profile` | unset |
+
+To type arguments from a contract's on-chain interface instead of SoroVault,
+pass `--abi-from-chain`. Stellar Asset Contracts have no Wasm interface and
+continue with inferred argument types, with a note in the result.
+
+Logs go to **stderr** in both formats, so redirecting stdout (or consuming
+`--json` output) never mixes a log line into the document being parsed.
+`LOG_FORMAT=json` (or `--log-format json`) emits one JSON object per line —
+filterable by field (`contract`, `status`) in CI and log aggregators instead
+of regex-parsed. `text`, the default, keeps the readable `key=value` lines.
 
 [.env.example](.env.example) documents every variable. SoroProbe reads the
 **environment**, not `.env` itself, so load it yourself:
@@ -750,14 +1312,45 @@ set -a && . ./.env && set +a
 docker run --env-file .env soroprobe check <contract>
 ```
 
-A config file, by contrast, is read directly. It is JSON with snake_case keys:
+A config file, by contrast, is read directly. JSON and YAML formats (`soroprobe.json`, `soroprobe.yaml`, `soroprobe.yml`) are supported, with snake_case keys (unknown keys are rejected in both formats). When no path is specified, SoroProbe looks for `soroprobe.json`, then `soroprobe.yaml`, and finally `soroprobe.yml`.
+
+### Profiles
+
+Config files can define named `profiles` for different networks (such as `testnet`, `mainnet`, or `local`). Select a profile using `--profile <name>` or the `SOROPROBE_PROFILE` environment variable. An unknown profile name produces an error listing the available profiles.
+
+In JSON:
 
 ```json
 {
   "rpc_url": "https://soroban-testnet.stellar.org",
   "warn_ledgers": 120960,
-  "critical_ledgers": 17280
+  "critical_ledgers": 17280,
+  "inspect_cache_ttl": "0s",
+  "profiles": {
+    "mainnet": {
+      "rpc_url": "https://rpc.mainnet.stellar.org",
+      "network_passphrase": "Public Global Stellar Network ; September 2015",
+      "warn_ledgers": 172800,
+      "critical_ledgers": 34560
+    }
+  }
 }
+```
+
+Or in YAML:
+
+```yaml
+# SoroProbe configuration
+rpc_url: https://soroban-testnet.stellar.org
+warn_ledgers: 120960
+critical_ledgers: 17280
+
+profiles:
+  mainnet:
+    rpc_url: https://rpc.mainnet.stellar.org
+    network_passphrase: "Public Global Stellar Network ; September 2015"
+    warn_ledgers: 172800
+    critical_ledgers: 34560
 ```
 
 ## Why no secret key
@@ -783,6 +1376,7 @@ never submitted. There is a test asserting the envelope carries no signatures.
 ```
 cmd/soroprobe     cobra CLI and output rendering
 internal/config   defaults, config file and environment resolution
+internal/integration  read-only clients for sibling services (SoroForge)
 internal/stellar  Stellar RPC client behind an interface, ledger keys, tx building
   └── stellartest fixture-backed fake + the recorder that captures fixtures
 internal/scval    ScVal encode/decode behind an interface, with a type registry

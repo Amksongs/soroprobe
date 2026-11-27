@@ -111,6 +111,16 @@ func renderSimulate(w io.Writer, r *probe.SimulateResult) error {
 	} else {
 		bw.printf("%s %s\n", s.bold("function"), r.Function)
 	}
+	if r.FromEnvelope {
+		bw.printf("%s %s\n", s.bold("source  "), r.Source)
+		if len(r.DecodedArgs) > 0 {
+			encoded, err := json.Marshal(r.DecodedArgs)
+			if err != nil {
+				return err
+			}
+			bw.printf("%s %s\n", s.bold("args    "), encoded)
+		}
+	}
 	if len(r.EncodedArgs) > 0 {
 		bw.printf("%s %s\n", s.bold("encoded "), strings.Join(r.EncodedArgs, " "))
 	}
@@ -144,6 +154,25 @@ func renderSimulate(w io.Writer, r *probe.SimulateResult) error {
 	bw.printf("  write bytes        %d\n", r.Cost.WriteBytes)
 	bw.printf("  resource fee       %s\n", stroops(r.Cost.ResourceFee))
 	bw.printf("  min resource fee   %s\n", stroops(r.Cost.MinResourceFee))
+	bw.printf("  estimated total fee %s\n", stroops(r.Cost.EstimatedTotalFee))
+
+	if len(r.Auth) > 0 {
+		bw.printf("\n%s\n", s.bold("authorizations"))
+		for _, a := range r.Auth {
+			if a.RawXDR != "" {
+				bw.printf("  %s %s\n", s.dim("raw xdr:"), a.RawXDR)
+				continue
+			}
+			src := ""
+			if a.IsSourceAccount {
+				src = s.dim(" (source account)")
+			}
+			bw.printf("  %s%s\n", s.cyan(a.Address), src)
+			if a.RootInvocation != nil {
+				renderAuthorizedInvocation(bw, s, a.RootInvocation, "    ")
+			}
+		}
+	}
 
 	if n := len(r.Footprint.ReadOnly) + len(r.Footprint.ReadWrite); n > 0 {
 		bw.printf("\n%s\n", s.bold("footprint"))
@@ -153,6 +182,14 @@ func renderSimulate(w io.Writer, r *probe.SimulateResult) error {
 		for _, k := range r.Footprint.ReadWrite {
 			bw.printf("  %s %s\n", s.cyan("write"), k)
 		}
+	}
+
+	if r.Trace != nil {
+		bw.printf("\n%s\n", s.bold("call trace"))
+		if len(r.Trace) == 0 {
+			bw.printf("  %s\n", s.dim("no fn_call events in the simulation"))
+		}
+		renderTrace(bw, s, r.Trace, 0)
 	}
 
 	if r.Comparison != nil {
@@ -167,6 +204,9 @@ func renderSimulate(w io.Writer, r *probe.SimulateResult) error {
 		bw.printf("\n%s\n", s.red("RESTORE REQUIRED"))
 		bw.printf("  This call touches archived entries. They must be restored before it\n")
 		bw.printf("  can run. Restore fee: %s\n", stroops(r.RestoreRequired.MinResourceFee))
+		for _, entry := range r.RestoreRequired.ArchivedEntries {
+			bw.printf("  archived: %s\n", entry)
+		}
 	}
 
 	// Diagnostic events are not printed here: Stellar RPC already embeds a
@@ -276,6 +316,9 @@ func renderInspect(w io.Writer, r *probe.InspectResult) error {
 
 	if !r.Deployed {
 		bw.printf("%s\n", s.red("NOT DEPLOYED  no contract instance entry found on this network"))
+		if r.CloseTimeNote != "" {
+			bw.printf("%s\n", s.dim("note: "+r.CloseTimeNote))
+		}
 		bw.printf("\n%s\n", s.dim(fmt.Sprintf("checked at ledger %d", r.LatestLedger)))
 		return bw.err
 	}
@@ -296,6 +339,10 @@ func renderInspect(w io.Writer, r *probe.InspectResult) error {
 		renderEntry(bw, s, "data "+d.Key, d)
 	}
 
+	if r.Asset != nil {
+		renderAsset(bw, s, r.Asset)
+	}
+
 	if r.InstanceStorage != nil {
 		encoded, err := json.MarshalIndent(r.InstanceStorage, "  ", "  ")
 		if err != nil {
@@ -310,8 +357,37 @@ func renderInspect(w io.Writer, r *probe.InspectResult) error {
 	}
 
 	bw.printf("\n%s %s\n", s.bold("overall"), s.status(r.Status))
+	if r.CloseTimeNote != "" {
+		bw.printf("%s\n", s.dim("note: "+r.CloseTimeNote))
+	}
 	bw.printf("%s\n", s.dim(fmt.Sprintf("checked at ledger %d", r.LatestLedger)))
 	return bw.err
+}
+
+// renderAsset prints the classic asset a Stellar Asset Contract wraps, and
+// the issuer flags that decide whether a holder can be frozen or clawed back.
+func renderAsset(bw *bufWriter, s styler, a *probe.AssetDetails) {
+	bw.printf("\n%s\n", s.bold("asset"))
+	bw.printf("  %-8s %s\n", "type", a.Type)
+	if a.Code != "" {
+		bw.printf("  %-8s %s\n", "code", a.Code)
+	}
+	if a.Issuer != "" {
+		bw.printf("  %-8s %s\n", "issuer", a.Issuer)
+	}
+	if a.Admin != "" {
+		bw.printf("  %-8s %s\n", "admin", a.Admin)
+	}
+	if a.IssuerFound != nil && *a.IssuerFound {
+		flags := "none set"
+		if len(a.IssuerFlags) > 0 {
+			flags = strings.Join(a.IssuerFlags, ", ")
+		}
+		bw.printf("  %-8s %s\n", "flags", flags)
+	}
+	if a.Note != "" {
+		bw.printf("  %s\n", s.dim("note: "+a.Note))
+	}
 }
 
 // renderExtendEstimates prints what it would cost to keep each entry alive.
@@ -356,6 +432,9 @@ func renderCheck(w io.Writer, r *probe.CheckResult) error {
 		bw.printf("%s\n", s.red("FAIL"))
 	}
 	bw.printf("%s\n", s.dim(fmt.Sprintf("checked at ledger %d", r.LatestLedger)))
+	if r.CloseTimeNote != "" {
+		bw.printf("%s\n", s.dim("note: "+r.CloseTimeNote))
+	}
 	return bw.err
 }
 
@@ -385,10 +464,248 @@ func renderBatch(w io.Writer, r *probe.BatchResult) error {
 			verdict, detail = s.red("FAIL "), firstNotPassing(item.Result, probe.OutcomeFail)
 		}
 		bw.printf("  %s  %-*s  %s\n", verdict, width, item.Name, detail)
+		if item.Result != nil && item.Result.CloseTimeNote != "" {
+			bw.printf("  %s\n", s.dim("note: "+item.Result.CloseTimeNote))
+		}
 	}
 
 	bw.printf("\n%s %d passed, %d failed, %d could not run\n", s.bold("result"), passed, failed, errored)
 	return bw.err
+}
+
+func renderMarkdownCheck(w io.Writer, r *probe.CheckResult) error {
+	bw := &bufWriter{w: w}
+	verdict := "FAIL"
+	if r.OK {
+		verdict = "PASS"
+	}
+	bw.printf("Contract: %s | Result: **%s**\n\n", markdownCell(r.ContractID), verdict)
+	bw.printf("| Check | Verdict | Details |\n| --- | --- | --- |\n")
+	for _, check := range r.Checks {
+		bw.printf("| %s | %s | %s |\n", markdownCell(check.Name), strings.ToUpper(fmt.Sprint(check.Outcome)), markdownCell(check.Detail))
+	}
+	return bw.err
+}
+
+func renderMarkdownBatch(w io.Writer, r *probe.BatchResult) error {
+	bw := &bufWriter{w: w}
+	verdict := "PASS"
+	if !r.OK {
+		verdict = "FAIL"
+	}
+	passed, failed, errored := 0, 0, 0
+	for _, item := range r.Items {
+		switch {
+		case item.Error != "":
+			errored++
+		case item.Result.OK:
+			passed++
+		default:
+			failed++
+		}
+	}
+	bw.printf("Checks: **%s** (%d passed, %d failed, %d could not run)\n\n", verdict, passed, failed, errored)
+	bw.printf("| Check | Contract | Verdict | Details |\n| --- | --- | --- | --- |\n")
+	for _, item := range r.Items {
+		switch {
+		case item.Error != "":
+			bw.printf("| %s | %s | ERROR | %s |\n", markdownCell(item.Name), markdownCell(item.ContractID), markdownCell(item.Error))
+		case item.Result.OK:
+			bw.printf("| %s | %s | PASS | %s |\n", markdownCell(item.Name), markdownCell(item.ContractID), markdownCell(firstNotPassing(item.Result, probe.OutcomeWarn)))
+		default:
+			bw.printf("| %s | %s | FAIL | %s |\n", markdownCell(item.Name), markdownCell(item.ContractID), markdownCell(firstNotPassing(item.Result, probe.OutcomeFail)))
+		}
+	}
+	return bw.err
+}
+
+func renderMarkdownInspect(w io.Writer, r *probe.InspectResult) error {
+	bw := &bufWriter{w: w}
+	bw.printf("Contract: %s | Status: **%s**\n\n", markdownCell(r.ContractID), markdownCell(fmt.Sprint(r.Status)))
+	bw.printf("| Entry | Verdict | Details |\n| --- | --- | --- |\n")
+	if !r.Deployed {
+		bw.printf("| Deployment | FAIL | %s |\n", markdownCell(r.Instance.Summary))
+		return bw.err
+	}
+	bw.printf("| Instance | %s | %s |\n", markdownCell(fmt.Sprint(r.Instance.Status)), markdownCell(r.Instance.Summary))
+	if r.Code != nil {
+		bw.printf("| Code | %s | %s |\n", markdownCell(fmt.Sprint(r.Code.Status)), markdownCell(r.Code.Summary))
+	}
+	for _, entry := range r.Data {
+		bw.printf("| Data %s | %s | %s |\n", markdownCell(entry.Key), markdownCell(fmt.Sprint(entry.Status)), markdownCell(entry.Summary))
+	}
+	return bw.err
+}
+
+func markdownCell(value string) string {
+	return strings.NewReplacer("\\", "\\\\", "|", "\\|", "`", "\\`", "\r\n", "<br>", "\n", "<br>", "\r", "<br>").Replace(value)
+}
+
+// renderCompare prints a two-network comparison as a set of small tables, so
+// a difference is visible at the row where it occurs rather than only in the
+// final verdict.
+func renderCompare(w io.Writer, r *probe.CompareResult) error {
+	s := styler{on: colorEnabled(w)}
+	bw := &bufWriter{w: w}
+
+	bw.printf("%s %s vs %s\n\n", s.bold("compare"), r.Testnet.Network, r.Mainnet.Network)
+
+	bw.printf("%s\n", s.bold("contracts"))
+	bw.printf("  %-16s %s\n", r.Testnet.Network, compareContractID(r.Testnet.Inspect))
+	bw.printf("  %-16s %s\n\n", r.Mainnet.Network, compareContractID(r.Mainnet.Inspect))
+
+	bw.printf("%s\n", s.bold("wasm"))
+	bw.printf("  %-16s %s\n", r.Testnet.Network, compareWasmHash(r.Testnet.Inspect))
+	bw.printf("  %-16s %s\n", r.Mainnet.Network, compareWasmHash(r.Mainnet.Inspect))
+	if r.WasmMatch {
+		bw.printf("  %s  the deployed Wasm is the same on both networks\n", s.green("MATCH"))
+	} else {
+		bw.printf("  %s  the deployed Wasm differs; the two deployments are not the same build\n", s.red("DIFFERENT"))
+	}
+
+	bw.printf("\n%s\n", s.bold("state entries"))
+	bw.printf("  %-18s %-26s %-26s %s\n", "ENTRY", r.Testnet.Network, r.Mainnet.Network, "VERDICT")
+	for _, entry := range r.Entries {
+		bw.printf("  %-18s %-26s %-26s %s\n",
+			compareEntryLabel(entry),
+			compareStatusCell(entry.TestnetStatus, entry.TestnetLedgersRemaining),
+			compareStatusCell(entry.MainnetStatus, entry.MainnetLedgersRemaining),
+			compareVerdict(s, entry.Differ))
+	}
+
+	if len(r.Calls) > 0 {
+		bw.printf("\n%s\n", s.bold("read-only calls"))
+		bw.printf("  %-14s %-34s %-34s %s\n", "CALL", r.Testnet.Network, r.Mainnet.Network, "VERDICT")
+		for _, call := range r.Calls {
+			bw.printf("  %-14s %-34s %-34s %s\n",
+				truncate(call.Name, 14),
+				truncate(compareCallCell(call.Testnet), 34),
+				truncate(compareCallCell(call.Mainnet), 34),
+				compareVerdict(s, call.Differ))
+			if call.Differ && call.Detail != "" {
+				bw.printf("  %-14s %s\n", "", s.dim(call.Detail))
+			}
+		}
+	}
+
+	otherDifferences := 0
+	for _, entry := range r.Entries {
+		if entry.Differ {
+			otherDifferences++
+		}
+	}
+	for _, call := range r.Calls {
+		if call.Differ {
+			otherDifferences++
+		}
+	}
+
+	bw.printf("\n%s ", s.bold("result"))
+	if r.WasmMatch {
+		bw.printf("%s", s.green("MATCH"))
+		if otherDifferences > 0 {
+			bw.printf("  %s", s.dim(fmt.Sprintf("(%d other difference(s) highlighted above)", otherDifferences)))
+		}
+		bw.printf("\n")
+	} else {
+		bw.printf("%s  the Wasm hashes do not match\n", s.red("DIFFERENT"))
+	}
+
+	bw.printf("%s\n", s.dim(fmt.Sprintf("checked at ledgers %d (%s) and %d (%s)",
+		compareLatestLedger(r.Testnet.Inspect), r.Testnet.Network,
+		compareLatestLedger(r.Mainnet.Inspect), r.Mainnet.Network)))
+	return bw.err
+}
+
+func compareContractID(inspect *probe.InspectResult) string {
+	if inspect == nil || inspect.ContractID == "" {
+		return "(not read)"
+	}
+	if !inspect.Deployed {
+		return inspect.ContractID + "  (not deployed)"
+	}
+	return inspect.ContractID
+}
+
+func compareWasmHash(inspect *probe.InspectResult) string {
+	if inspect == nil {
+		return "(not read)"
+	}
+	if !inspect.Deployed {
+		return "not deployed"
+	}
+	if inspect.Executable == "stellar_asset" {
+		return "stellar_asset (built into the host, no Wasm entry)"
+	}
+	if inspect.WasmHash == "" {
+		return "unknown (no Wasm hash reported)"
+	}
+	return inspect.WasmHash
+}
+
+func compareEntryLabel(entry probe.CompareEntry) string {
+	if entry.Key != "" {
+		return entry.Kind + " " + entry.Key
+	}
+	return entry.Kind
+}
+
+func compareStatusCell(status string, ledgers int64) string {
+	if status == "" || status == "n/a" {
+		return "n/a"
+	}
+	return fmt.Sprintf("%s (%d ledgers)", status, ledgers)
+}
+
+func compareCallCell(result *probe.SimulateResult) string {
+	if result == nil {
+		return "n/a"
+	}
+	if !result.Success {
+		return "failed"
+	}
+	value := "(void)"
+	if result.ReturnValue != nil {
+		encoded, err := json.Marshal(result.ReturnValue)
+		if err == nil {
+			value = string(encoded)
+		}
+	}
+	return "success, return " + value
+}
+
+func compareVerdict(s styler, differ bool) string {
+	if differ {
+		return s.red("DIFFERENT")
+	}
+	return s.green("MATCH")
+}
+
+func compareLatestLedger(inspect *probe.InspectResult) uint32 {
+	if inspect == nil {
+		return 0
+	}
+	return inspect.LatestLedger
+}
+
+func renderAuthorizedInvocation(bw *bufWriter, s styler, inv *probe.AuthorizedInvocation, indent string) {
+	var args []string
+	for _, arg := range inv.Args {
+		b, err := json.Marshal(arg)
+		if err != nil {
+			args = append(args, fmt.Sprint(arg))
+		} else {
+			args = append(args, string(b))
+		}
+	}
+	target := inv.Function
+	if inv.ContractID != "" {
+		target = inv.ContractID + "::" + inv.Function
+	}
+	bw.printf("%s%s(%s)\n", indent, target, strings.Join(args, ", "))
+	for _, sub := range inv.SubInvocations {
+		renderAuthorizedInvocation(bw, s, &sub, indent+"  ")
+	}
 }
 
 // firstNotPassing describes the first step with the given outcome, or

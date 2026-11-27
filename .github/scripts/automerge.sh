@@ -95,6 +95,45 @@ main_sha=$(gh api "repos/$repo/commits/main" --jq '.sha')
 main_time=$(gh api "repos/$repo/commits/main" --jq '.commit.committer.date')
 log "main is $main_sha ($main_time)"
 
+# Merging one PR moves main, which used to make every other PR stale until
+# its CI re-ran. With dozens of PRs queued that serialises everything behind
+# CI. Instead, a PR whose checks predate main may still merge when nothing
+# main gained since the PR's merge base touches the same directories (Go
+# packages) as the PR, and main itself is green. Anything that could change a
+# PR's build — go.mod/go.sum or CI definitions on main — still forces a
+# re-run. Up to MAX_MERGES non-overlapping PRs merge per run; CI on main runs
+# once afterwards, and a red main stops relaxed merging until it is fixed.
+max_merges="${MAX_MERGES:-8}"
+merges=0
+main_ci_ok=false
+if [ -n "${CI_WORKFLOW:-}" ]; then
+  ci_state=$(gh run list -R "$repo" --workflow "$CI_WORKFLOW" --branch main --limit 20 \
+    --json headSha,status,conclusion \
+    --jq "[.[] | select(.headSha == \"$main_sha\")][0] | \"\(.status) \(.conclusion)\"" 2>/dev/null || true)
+  [ "$ci_state" = "completed success" ] && main_ci_ok=true
+  log "CI on main: ${ci_state:-not run}; relaxed freshness $([ "$main_ci_ok" = true ] && echo on || echo off)"
+fi
+git fetch -q --no-tags origin main || true
+
+# dirs_of prints the distinct directories of the given paths, ignoring
+# documentation, which cannot change what a PR builds or tests.
+dirs_of() { grep -vE '\.(md|txt)$' | sed -E 's#/[^/]*$##; t; s#.*#.#' | sort -u; }
+
+# unaffected_by_main reports whether main has changed nothing since the PR's
+# merge base that could alter the PR's build: no shared directory, and no
+# module or workflow definition change. Main is read from origin/main, which is
+# refreshed after every merge in this run.
+unaffected_by_main() {
+  local head="$1" pr_files="$2" base changed
+  git fetch -q --no-tags origin "+refs/pull/$pr/head:refs/automerge/pr-$pr" 2>/dev/null || return 1
+  base=$(git merge-base origin/main "$head" 2>/dev/null) || return 1
+  changed=$(git diff --name-only "$base" origin/main)
+  [ -z "$changed" ] && return 0
+  # Workflow files, not the bot's own scripts, decide how a PR is built.
+  grep -qE '(^|/)go\.(mod|sum)$|^\.github/workflows/|(^|/)package(-lock)?\.json$' <<<"$changed" && return 1
+  [ -z "$(comm -12 <(dirs_of <<<"$changed") <(dirs_of <<<"$pr_files"))" ]
+}
+
 prs=$(gh pr list -R "$repo" --state open --base main --limit 100 \
   --json number,isDraft,headRefOid,author,labels,title)
 
@@ -183,6 +222,11 @@ Passing CI cannot show that removed tests were safe to remove, so a maintainer w
       if [[ "$done_at" < "$main_time" ]]; then stale="$stale $run"; fi
     done < <(matching_checks "$name")
   done
+  if [ -n "$stale" ] && [ "$main_ci_ok" = true ] &&
+     unaffected_by_main "$sha" "$(awk '{print $2}' <<<"$files")"; then
+    log "  main moved, but not in this PR's directories; its checks still apply"
+    stale=""
+  fi
   if [ -n "$stale" ]; then
     hold "$pr" "$stale_label" "stale" "Main has moved since this PR's checks ran, so they no longer show it works with the current code. Please update your branch (the **Update branch** button, or merge or rebase \`main\`) to re-run CI; it will be merged automatically once the new checks pass."
     continue
@@ -229,9 +273,52 @@ A maintainer will review it."
     fi
   fi
 
+  # Substance: a PR that closes issues must change enough to plausibly do
+  # what they ask. A one-line comment passes every test, so CI alone cannot
+  # tell finished work from a placeholder that only claims an issue's points.
+  # Count added lines that are not blank and not comment-only, in code and
+  # config files; Markdown counts only towards documentation issues. Each
+  # closed issue needs at least 5 (trivial), 20 (medium) or 50 (high) such
+  # lines. Falling short holds the PR for a maintainer — it is not rejected.
+  closes=$(gh pr view "$pr" -R "$repo" --json closingIssuesReferences \
+    --jq '.closingIssuesReferences[].number' 2>/dev/null || true)
+  if [ -n "$closes" ]; then
+    need=0 docs=false claimed=""
+    for issue in $closes; do
+      labels=$(gh issue view "$issue" -R "$repo" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null || true)
+      case ",$labels," in
+        *",complexity: high,"*) need=$((need + 50)) ;;
+        *",complexity: medium,"*) need=$((need + 20)) ;;
+        *) need=$((need + 5)) ;;
+      esac
+      case ",$labels," in *",documentation,"*) docs=true ;; esac
+      claimed="$claimed #$issue"
+    done
+    git fetch -q --no-tags origin "+refs/pull/$pr/head:refs/automerge/pr-$pr" 2>/dev/null || true
+    have=$(git diff --no-ext-diff --no-textconv -U0 "$main_sha...$sha" 2>/dev/null | DOCS="$docs" perl -ne '
+      if (m{^\+\+\+ (?:b/)?(.*)$}) { $f = $1; next }
+      next if m{^\+\+\+|^---};
+      next unless defined $f && s/^\+//;
+      next if $f =~ m{(?:^|/)go\.sum$};
+      my $prose = $f =~ /\.(?:md|txt|rst)$/i;
+      next if $prose && $ENV{DOCS} ne "true";
+      next if /^\s*$/;
+      next if !$prose && m{^\s*(?://|#|/\*|\*|--)};
+      $n++;
+      END { print $n + 0 }')
+    if [ "${have:-0}" -lt "$need" ]; then
+      hold "$pr" "$hold_label" "insubstantial" "Auto-merge skipped this PR because its changes look too small for the issues it closes ($claimed): about ${have:-0} substantive added line(s), where those issues would normally need at least $need. Blank lines and comment-only lines do not count, and Markdown counts only towards documentation issues.
+
+If the work is complete, a maintainer will review and merge it. Otherwise, please finish the issues before asking for review — points are awarded for the work the issue describes."
+      continue
+    fi
+  fi
+
   if [ "$dry_run" = true ]; then
     log "  WOULD MERGE #$pr"
-    exit 0
+    merges=$((merges + 1))
+    [ "$merges" -ge "$max_merges" ] && break
+    continue
   fi
 
   # The squash message is the PR's own title and description. GitHub's
@@ -255,14 +342,26 @@ A maintainer will review it."
         --comment "Resolved by #$pr, which has been merged." >/dev/null 2>&1 \
         && log "  closed #$issue" || log "  could not close #$issue"
     done
-    # Pushes made with the workflow token do not trigger workflows, so run
-    # CI on main explicitly to confirm the merged result.
-    if [ -n "${CI_WORKFLOW:-}" ]; then
-      gh workflow run "$CI_WORKFLOW" -R "$repo" --ref main || log "  could not dispatch $CI_WORKFLOW on main"
-    fi
-    exit 0
+    merges=$((merges + 1))
+    # The next PR is judged against the main this merge produced.
+    git fetch -q --no-tags origin main || true
+    main_sha=$(git rev-parse origin/main)
+    # Only checks that were fresh before any merge in this run are fresh now;
+    # everything else must pass the directory test against the new main.
+    main_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    [ "$merges" -ge "$max_merges" ] && break
+    continue
   fi
   log "  merge failed for #$pr"
 done
 
-log "nothing to merge"
+if [ "$merges" -gt 0 ]; then
+  log "merged $merges pull request(s)"
+  # Pushes made with the workflow token do not trigger workflows, so run CI
+  # on main explicitly to confirm the merged result.
+  if [ "$dry_run" != true ] && [ -n "${CI_WORKFLOW:-}" ]; then
+    gh workflow run "$CI_WORKFLOW" -R "$repo" --ref main || log "could not dispatch $CI_WORKFLOW on main"
+  fi
+else
+  log "nothing to merge"
+fi

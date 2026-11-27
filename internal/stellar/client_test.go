@@ -17,6 +17,15 @@ import (
 	"github.com/soroworks/soroprobe/internal/stellar/stellartest"
 )
 
+// Boundaries for the numeric fields the RPC responses carry. Naming them keeps
+// the edge-case tables readable and makes the "just past the boundary" cases
+// next to the values they exceed.
+const (
+	maxUint32 = 4_294_967_295
+	maxInt64  = 9_223_372_036_854_775_807
+	maxInt32  = 2_147_483_647
+)
+
 // rpcStub serves canned JSON-RPC results, so the live client can be exercised
 // without a network. It records the method names it was asked for.
 type rpcStub struct {
@@ -88,6 +97,68 @@ func TestRPCClientSimulateTransaction(t *testing.T) {
 	assert.Equal(t, []string{"simulateTransaction"}, stub.methods)
 }
 
+func TestRPCClientSimulateTransactionEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		tx      string
+		result  map[string]any
+		want    protocol.SimulateTransactionResponse
+		wantErr bool
+	}{
+		{
+			// An empty envelope is not rejected client-side: the RPC node owns
+			// envelope validation, so the client must forward it and let the
+			// node's answer be what the caller sees.
+			name:   "empty transaction",
+			tx:     "",
+			result: map[string]any{},
+		},
+		{
+			name: "boundary fee and ledger",
+			tx:   "irrelevant",
+			result: map[string]any{
+				"minResourceFee": "9223372036854775807",
+				"latestLedger":   uint32(maxUint32),
+			},
+			want: protocol.SimulateTransactionResponse{
+				MinResourceFee: maxInt64,
+				LatestLedger:   maxUint32,
+			},
+		},
+		{
+			// Results must be an array of host-function results; a scalar is a
+			// malformed response and must not decode into an empty success.
+			name:    "results is not an array",
+			tx:      "irrelevant",
+			result:  map[string]any{"results": "not-an-array"},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client, stub := newStubClient(t, map[string]any{"simulateTransaction": tt.result})
+
+			resp, err := client.SimulateTransaction(context.Background(),
+				protocol.SimulateTransactionRequest{Transaction: tt.tx})
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "simulateTransaction")
+				assert.Equal(t, protocol.SimulateTransactionResponse{}, resp)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, resp)
+			assert.Equal(t, []string{"simulateTransaction"}, stub.methods)
+		})
+	}
+}
+
 func TestRPCClientGetLedgerEntries(t *testing.T) {
 	t.Parallel()
 
@@ -119,6 +190,66 @@ func TestRPCClientGetLatestLedger(t *testing.T) {
 	assert.EqualValues(t, 27, resp.ProtocolVersion)
 }
 
+func TestRPCClientGetLatestLedgerEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		result  map[string]any
+		want    protocol.GetLatestLedgerResponse
+		wantErr bool
+	}{
+		{
+			// An empty result keeps every field at its zero value rather than
+			// the client inventing a ledger number of its own.
+			name:   "empty result",
+			result: map[string]any{},
+		},
+		{
+			name: "boundary sequence and protocol version",
+			result: map[string]any{
+				"id":              "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+				"sequence":        uint32(maxUint32),
+				"protocolVersion": uint32(maxUint32),
+				"closeTime":       "9223372036854775807",
+			},
+			want: protocol.GetLatestLedgerResponse{
+				Hash:            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+				Sequence:        maxUint32,
+				ProtocolVersion: maxUint32,
+				LedgerCloseTime: maxInt64,
+			},
+		},
+		{
+			// A ledger sequence is an unsigned number; a negative one cannot be
+			// wrapped into range without silently reporting a real ledger.
+			name:    "negative sequence",
+			result:  map[string]any{"sequence": -1},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client, stub := newStubClient(t, map[string]any{"getLatestLedger": tt.result})
+
+			resp, err := client.GetLatestLedger(context.Background())
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "getLatestLedger")
+				assert.Equal(t, protocol.GetLatestLedgerResponse{}, resp)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, resp)
+			assert.Equal(t, []string{"getLatestLedger"}, stub.methods)
+		})
+	}
+}
+
 func TestRPCClientGetNetwork(t *testing.T) {
 	t.Parallel()
 
@@ -131,6 +262,67 @@ func TestRPCClientGetNetwork(t *testing.T) {
 	assert.Equal(t, "Test SDF Network ; September 2015", resp.Passphrase)
 }
 
+func TestRPCClientGetNetworkEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		result  map[string]any
+		want    protocol.GetNetworkResponse
+		wantErr bool
+	}{
+		{
+			// An empty result must not be confused with a wrong-network
+			// answer: the fields stay zero and no error is invented.
+			name:   "empty result",
+			result: map[string]any{},
+		},
+		{
+			name: "boundary protocol version",
+			result: map[string]any{
+				"passphrase":      "Public Global Stellar Network ; September 2015",
+				"protocolVersion": int(maxInt32),
+				"friendbotUrl":    "https://friendbot.stellar.org",
+			},
+			want: protocol.GetNetworkResponse{
+				Passphrase:      "Public Global Stellar Network ; September 2015",
+				ProtocolVersion: int(maxInt32),
+				FriendbotURL:    "https://friendbot.stellar.org",
+			},
+		},
+		{
+			// protocolVersion is a number on the wire; a quoted value is a
+			// malformed response and must not decode into a silent zero.
+			name: "protocol version is a string",
+			result: map[string]any{
+				"passphrase":      "Test SDF Network ; September 2015",
+				"protocolVersion": "27",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client, stub := newStubClient(t, map[string]any{"getNetwork": tt.result})
+
+			resp, err := client.GetNetwork(context.Background())
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "getNetwork")
+				assert.Equal(t, protocol.GetNetworkResponse{}, resp)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, resp)
+			assert.Equal(t, []string{"getNetwork"}, stub.methods)
+		})
+	}
+}
+
 func TestRPCClientGetHealth(t *testing.T) {
 	t.Parallel()
 
@@ -141,6 +333,71 @@ func TestRPCClientGetHealth(t *testing.T) {
 	resp, err := client.GetHealth(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, "healthy", resp.Status)
+}
+
+func TestRPCClientGetHealthEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		result  map[string]any
+		want    protocol.GetHealthResponse
+		wantErr bool
+	}{
+		{
+			// An empty result is still a well-formed response: status and the
+			// retention window keep their zero values instead of the client
+			// treating an absent window as healthy.
+			name:   "empty result",
+			result: map[string]any{},
+		},
+		{
+			name: "boundary ledger window",
+			result: map[string]any{
+				"status":                "healthy",
+				"latestLedger":          uint32(maxUint32),
+				"latestLedgerCloseTime": "9223372036854775807",
+				"oldestLedger":          uint32(maxUint32),
+				"oldestLedgerCloseTime": "9223372036854775807",
+				"ledgerRetentionWindow": uint32(maxUint32),
+			},
+			want: protocol.GetHealthResponse{
+				Status:                "healthy",
+				LatestLedger:          maxUint32,
+				LatestLedgerCloseTime: maxInt64,
+				OldestLedger:          maxUint32,
+				OldestLedgerCloseTime: maxInt64,
+				LedgerRetentionWindow: maxUint32,
+			},
+		},
+		{
+			// One past the end of uint32 must fail to decode rather than wrap
+			// around to ledger 0, which would read as an empty chain.
+			name:    "latest ledger beyond uint32",
+			result:  map[string]any{"latestLedger": uint64(maxUint32) + 1},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			client, stub := newStubClient(t, map[string]any{"getHealth": tt.result})
+
+			resp, err := client.GetHealth(context.Background())
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "getHealth")
+				assert.Equal(t, protocol.GetHealthResponse{}, resp)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, resp)
+			assert.Equal(t, []string{"getHealth"}, stub.methods)
+		})
+	}
 }
 
 func TestRPCClientWrapsErrorsWithMethodName(t *testing.T) {

@@ -7,6 +7,7 @@
 package probe
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"time"
@@ -28,6 +29,7 @@ type Prober struct {
 	ledgerTime         *ledgerTimeCache
 
 	abi          abi.Source
+	chain        *abi.ChainSource
 	network      string
 	baseFee      int64
 	inspectCache *inspectCache
@@ -100,6 +102,7 @@ func New(opts Options) (*Prober, error) {
 		log:                opts.Logger,
 		ledgerTime:         &ledgerTimeCache{},
 		abi:                opts.ABI,
+		chain:              abi.NewChainSource(opts.Client),
 		network:            opts.Network,
 		inspectCache:       cache,
 		baseFee:            baseFee,
@@ -158,4 +161,16 @@ type Event struct {
 	Data any `json:"data,omitempty"`
 	// InSuccessfulContractCall is false for events from a failed sub-call.
 	InSuccessfulContractCall bool `json:"in_successful_contract_call"`
+}
+
+// Interface returns the interface stored in a deployed contract's Wasm. It
+// always reads the chain, never the configured ABI source: a comparison or a
+// standard check is about what is deployed, not what a registry remembers.
+func (p *Prober) Interface(ctx context.Context, contractID string) (*abi.Interface, error) {
+	return p.chain.Interface(ctx, p.network, contractID)
+}
+
+// Code returns the Wasm a deployed contract is running and its hash in hex.
+func (p *Prober) Code(ctx context.Context, contractID string) ([]byte, string, error) {
+	return p.chain.Code(ctx, contractID)
 }

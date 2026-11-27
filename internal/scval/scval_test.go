@@ -245,6 +245,69 @@ func TestEncodeErrors(t *testing.T) {
 	}
 }
 
+func TestEncodeSpecEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		spec     string
+		wantType xdr.ScValType
+	}{
+		// Empty input is not a valid symbol (symbols need at least one
+		// character), so it is encoded as an empty string.
+		{"empty spec is an empty string", "", xdr.ScValTypeScvString},
+		// A leading colon is not a type prefix, so inference takes over.
+		{"leading colon falls through to string", ":5", xdr.ScValTypeScvString},
+		// Prefixes containing non-name characters are not specs (URLs, say).
+		{"url falls through to string", "https://example.com", xdr.ScValTypeScvString},
+		// An unregistered prefix is not an error; the whole spec is inferred.
+		{"unknown prefix falls through to string", "nosuchtype:5", xdr.ScValTypeScvString},
+		// Type names are matched case-insensitively.
+		{"uppercase prefix", "U32:5", xdr.ScValTypeScvU32},
+		// Boundary: the widest symbol is 32 characters, one more becomes a string.
+		{"32 char symbol", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", xdr.ScValTypeScvSymbol},
+		{"33 char bare value is a string", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", xdr.ScValTypeScvString},
+	}
+
+	codec := scval.NewRegistry()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := codec.Encode(tt.spec)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantType, got.Type)
+		})
+	}
+}
+
+func TestEncodeEmptyLiteralErrors(t *testing.T) {
+	t.Parallel()
+
+	// A recognized prefix with nothing after it must fail rather than encode
+	// a zero value, and the error must quote the argument.
+	tests := []struct {
+		name string
+		spec string
+	}{
+		{"u32", "u32:"},
+		{"i128", "i128:"},
+		{"bool", "bool:"},
+		{"addr", "addr:"},
+	}
+
+	codec := scval.NewRegistry()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := codec.Encode(tt.spec)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.spec)
+		})
+	}
+}
+
 func TestEncodeAllReportsArgIndex(t *testing.T) {
 	t.Parallel()
 

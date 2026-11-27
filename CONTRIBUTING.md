@@ -16,6 +16,21 @@ You need Go, but **not** necessarily Go 1.25. The Stellar SDK requires it, and
 `GOTOOLCHAIN=auto` (Go's default since 1.21) will fetch the right toolchain
 automatically. If you have Go 1.21 or newer installed, `make` just works.
 
+### Or skip the local setup: use the dev container
+
+If you would rather not install anything, the repository ships a dev
+container (`.devcontainer/devcontainer.json`) for VS Code and GitHub
+Codespaces. Open the folder in a container (or start a Codespace) and you get
+Go 1.26 — the version CI installs — plus the same golangci-lint release CI
+runs, with nothing else to install:
+
+```bash
+make check   # gofmt, vet, tests — works the moment the container is up
+make lint    # golangci-lint, already present at the pinned version
+```
+
+SoroProbe needs no database, so the definition is a single container.
+
 Useful targets:
 
 | Target | Does |
@@ -51,6 +66,7 @@ seems to need persistence, please open an issue to discuss it before building.
 ```
 cmd/soroprobe     cobra CLI and output rendering
 internal/config   defaults, config file and environment resolution
+internal/integration  read-only clients for sibling services (SoroForge)
 internal/stellar  RPC client behind an interface, ledger keys, transaction building
   └── stellartest fixture-backed fake, plus the recorder that captures fixtures
 internal/scval    ScVal encode/decode behind an interface, with a type registry
@@ -102,6 +118,21 @@ Nothing outside `internal/scval` needs to change.
    you if you forget.
 4. If it needs fixture data, add it to the recorder and run `make fixtures`.
 
+For example, the `GetLatestLedger` forwarding method in `RPCClient` looks like:
+
+```go
+func (c *RPCClient) GetLatestLedger(ctx context.Context) (protocol.GetLatestLedgerResponse, error) {
+    ctx, cancel := c.withTimeout(ctx)
+    defer cancel()
+
+    resp, err := c.inner.GetLatestLedger(ctx)
+    if err != nil {
+        return resp, fmt.Errorf("getLatestLedger: %w", err)
+    }
+    return resp, nil
+}
+```
+
 ### Adding or recording a fixture
 
 When adding a feature or test case that needs new RPC responses (for example, a
@@ -132,6 +163,17 @@ Fixtures are pretty-printed and stable so diffs remain clean.
 makes it the easiest package to work in. Statuses are ordered by `Severity()`;
 if you add one, place it in that ordering and extend the ordering test.
 
+For example, thresholds are measured in ledgers; this classifies an entry with
+100 ledgers remaining as critical:
+
+```go
+currentLedger := uint32(1_000_000)
+liveUntil := currentLedger + 100
+thresholds := health.Thresholds{Warn: 1_000, Critical: 100}
+ttl := health.Evaluate(&liveUntil, currentLedger, health.DurabilityPersistent, thresholds)
+fmt.Println(ttl.Status) // critical
+```
+
 ### Re-verifying after a protocol upgrade
 
 Soroban's state model changes between protocol versions. After an upgrade:
@@ -159,7 +201,10 @@ version and the date verified. If field names moved, the compile will tell you.
 - One logical change per PR.
 - Include tests. Bug fixes should include a test that fails without the fix.
 - Update the README when you change user-visible behavior.
-- CI runs formatting, `go mod tidy` verification, vet, build and `go test -race`.
+- CI runs formatting, `go mod tidy` verification, vet, build and `go test -race`
+  on Linux, macOS and Windows (the Windows leg skips `-race`, which needs cgo
+  there).
+- No local toolchain? Use the dev container described under *Getting set up*.
 
 ## Reporting bugs
 
@@ -171,4 +216,18 @@ it directly.
 ## License
 
 By contributing you agree that your contributions are licensed under Apache-2.0,
-the same license as the project.
+the same license as the project. There is no CLA to sign and no per-file header
+to add — [LICENSE](LICENSE) covers the whole repository. If you do want to mark
+a new file, use the standard SPDX identifier:
+
+```go
+// SPDX-License-Identifier: Apache-2.0
+```
+
+The same applies to anything you add: a new dependency has to be Apache-2.0
+compatible, and its license is in the module cache after `go mod download`:
+
+```bash
+$ head -1 "$(go mod download -json github.com/stretchr/testify | jq -r '.Dir')/LICENSE"
+MIT License
+```

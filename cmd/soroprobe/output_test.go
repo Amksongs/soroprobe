@@ -217,6 +217,49 @@ func TestRenderInspectStellarAssetContractExplainsMissingCode(t *testing.T) {
 	assert.Contains(t, buf.String(), "built into the host")
 }
 
+func TestRenderInspectShowsAssetAndIssuerFlags(t *testing.T) {
+	t.Parallel()
+
+	found := true
+	var buf bytes.Buffer
+	err := renderInspect(&buf, &probe.InspectResult{
+		ContractID: "CDLZ",
+		Deployed:   true,
+		Executable: "stellar_asset",
+		Instance:   probe.EntryReport{TTL: health.TTL{Present: true, Status: health.StatusHealthy}, Summary: "live"},
+		Asset: &probe.AssetDetails{
+			Type:        probe.AssetAlphaNum4,
+			Code:        "USDC",
+			Issuer:      "GISSUER",
+			IssuerFound: &found,
+			IssuerFlags: []string{"AUTH_REQUIRED", "CLAWBACK"},
+		},
+		Status: health.StatusHealthy,
+	})
+	require.NoError(t, err)
+
+	out := buf.String()
+	assert.Contains(t, out, "USDC")
+	assert.Contains(t, out, "GISSUER")
+	assert.Contains(t, out, "AUTH_REQUIRED, CLAWBACK")
+}
+
+func TestRenderInspectNotesMissingIssuer(t *testing.T) {
+	t.Parallel()
+
+	found := false
+	var buf bytes.Buffer
+	err := renderInspect(&buf, &probe.InspectResult{
+		ContractID: "CDLZ",
+		Deployed:   true,
+		Executable: "stellar_asset",
+		Asset:      &probe.AssetDetails{Type: probe.AssetAlphaNum4, Code: "X", Issuer: "G", IssuerFound: &found, Note: "the issuer account was not found"},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "issuer account was not found")
+	assert.NotContains(t, buf.String(), "flags")
+}
+
 func TestRenderInspectNotDeployed(t *testing.T) {
 	t.Parallel()
 

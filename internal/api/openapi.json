@@ -255,6 +255,15 @@
             "explode": true
           },
           {
+            "name": "standard",
+            "in": "query",
+            "required": false,
+            "description": "Verify the contract's interface against a standard (sep41)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "expect",
             "in": "query",
             "required": false,
@@ -397,6 +406,10 @@
             "items": {
               "type": "string"
             }
+          },
+          "trace": {
+            "type": "boolean",
+            "description": "Build the cross-contract call tree from the simulation's diagnostic events."
           }
         },
         "required": ["contract_id", "function"]
@@ -444,6 +457,18 @@
           "footprint": {
             "$ref": "#/components/schemas/Footprint"
           },
+          "footprint_entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FootprintEntry"
+            }
+          },
+          "trace": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TraceFrame"
+            }
+          },
           "restore_required": {
             "$ref": "#/components/schemas/RestoreInfo"
           },
@@ -471,6 +496,34 @@
           "footprint",
           "latest_ledger"
         ]
+      },
+      "FootprintEntry": {
+        "type": "object",
+        "description": "A ledger entry the call touches. The called contract is named self.",
+        "properties": {
+          "access": { "type": "string", "enum": ["read_only", "read_write"] },
+          "kind": { "type": "string" },
+          "contract": { "type": "string" },
+          "key": {},
+          "durability": { "type": "string" },
+          "hash": { "type": "string" },
+          "account": { "type": "string" },
+          "label": { "type": "string" }
+        }
+      },
+      "TraceFrame": {
+        "type": "object",
+        "description": "One contract call in the simulated call tree.",
+        "properties": {
+          "contract": { "type": "string" },
+          "function": { "type": "string" },
+          "args": { "type": "array", "items": {} },
+          "arg_names": { "type": "array", "items": { "type": "string" } },
+          "returned": { "type": "boolean" },
+          "return": {},
+          "error": { "type": "string" },
+          "calls": { "type": "array", "items": { "$ref": "#/components/schemas/TraceFrame" } }
+        }
       },
       "Cost": {
         "type": "object",
@@ -617,6 +670,9 @@
               "$ref": "#/components/schemas/EntryReport"
             }
           },
+          "asset": {
+            "$ref": "#/components/schemas/AssetDetails"
+          },
           "instance_storage": {},
           "status": {
             "$ref": "#/components/schemas/HealthStatus"
@@ -632,6 +688,46 @@
           "status",
           "latest_ledger"
         ]
+      },
+      "AssetDetails": {
+        "type": "object",
+        "description": "The classic asset behind a Stellar Asset Contract, with the issuer flags that decide whether holders can be frozen or clawed back.",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "native",
+              "credit_alphanum4",
+              "credit_alphanum12"
+            ]
+          },
+          "code": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "admin": {
+            "type": "string"
+          },
+          "issuer_found": {
+            "type": "boolean"
+          },
+          "issuer_flags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "AUTH_REQUIRED",
+                "AUTH_REVOCABLE",
+                "CLAWBACK"
+              ]
+            }
+          },
+          "note": {
+            "type": "string"
+          }
+        }
       },
       "EntryReport": {
         "type": "object",

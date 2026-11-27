@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +58,8 @@ func inspectCacheKey(req InspectRequest) string {
 	b.WriteString(req.ContractID)
 	b.WriteByte(0)
 	b.WriteString(string(durability))
+	// An estimate changes the result, so it must change the key.
+	fmt.Fprintf(&b, "\x00extend=%d", req.EstimateExtend)
 	for _, key := range req.DataKeys {
 		b.WriteByte(0)
 		b.WriteString(key)
@@ -144,6 +147,15 @@ func cloneInspectResult(r *InspectResult) *InspectResult {
 	if r.Code != nil {
 		code := cloneEntryReport(*r.Code)
 		clone.Code = &code
+	}
+	if r.Asset != nil {
+		asset := *r.Asset
+		asset.IssuerFlags = append([]string(nil), r.Asset.IssuerFlags...)
+		if r.Asset.IssuerFound != nil {
+			found := *r.Asset.IssuerFound
+			asset.IssuerFound = &found
+		}
+		clone.Asset = &asset
 	}
 	return &clone
 }

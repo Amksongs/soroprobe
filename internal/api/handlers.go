@@ -202,6 +202,12 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := r.URL.Query()
+	if standard := query.Get("standard"); standard != "" {
+		if _, err := abi.LookupStandard(standard); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
 	checkReq := probe.CheckRequest{
 		ContractID:     chi.URLParam(r, "contract"),
 		Function:       query.Get("fn"),
@@ -209,6 +215,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		Expect:         query.Get("expect"),
 		DataKeys:       query["key"],
 		DataDurability: durability,
+		Standard:       query.Get("standard"),
 	}
 
 	if val := query.Get("max_instructions"); val != "" {
@@ -217,7 +224,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid max_instructions: %w", err))
 			return
 		}
-		u32v := uint32(v)
+		u32v := uint32(v) //nolint:gosec // G115: bounded by ParseUint(,10,32)
 		checkReq.MaxInstructions = &u32v
 	}
 	if val := query.Get("max_fee"); val != "" {
@@ -234,7 +241,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid max_write_bytes: %w", err))
 			return
 		}
-		u32v := uint32(v)
+		u32v := uint32(v) //nolint:gosec // G115: bounded by ParseUint(,10,32)
 		checkReq.MaxWriteBytes = &u32v
 	}
 

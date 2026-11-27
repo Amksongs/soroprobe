@@ -40,6 +40,30 @@ type CheckRequest struct {
 	MaxFeeStroops *int64 `json:"max_fee,omitempty" yaml:"max_fee,omitempty"`
 	// MaxWriteBytes bounds write bytes consumed by the simulation.
 	MaxWriteBytes *uint32 `json:"max_write_bytes,omitempty" yaml:"max_write_bytes,omitempty"`
+	// ExpectedWASMHash, when set, is the hex Wasm hash a deployment registry
+	// recorded for this contract. The check compares it with the live code
+	// hash and reports drift, which is how `check --from-soroforge` proves the
+	// chain still runs what was deployed. Empty skips the comparison.
+	ExpectedWASMHash string `json:"expected_wasm_hash,omitempty" yaml:"expected_wasm_hash,omitempty"`
+	// Standard, when set, names a published interface (see abi.Standards)
+	// the contract's exported functions are verified against.
+	Standard string `json:"standard,omitempty" yaml:"standard,omitempty"`
+	// AdminFn names a zero-argument function that returns the admin address,
+	// and AdminKey a storage key ("sym:Admin") that holds it. Either makes
+	// the check report the admin's security posture. Give one, not both.
+	AdminFn  string `json:"admin_fn,omitempty" yaml:"admin_fn,omitempty"`
+	AdminKey string `json:"admin_key,omitempty" yaml:"admin_key,omitempty"`
+	// Upgradeability adds a best-effort report on whether the contract can
+	// be changed: upgrade-like functions, their admin and the code entry's
+	// last-modified ledger.
+	Upgradeability bool `json:"upgradeability,omitempty" yaml:"upgradeability,omitempty"`
+	// RentPayer is the account ("G...") that pays to extend entries. The
+	// check compares its spendable balance with the cost of extending every
+	// entry that is running low by ExtendLedgers.
+	RentPayer string `json:"rent_payer,omitempty" yaml:"rent_payer,omitempty"`
+	// ExtendLedgers is how far to price the extension. Defaults to
+	// DefaultExtendLedgers.
+	ExtendLedgers uint32 `json:"extend_ledgers,omitempty" yaml:"extend_ledgers,omitempty"`
 }
 
 // CheckOutcome is the result of one individual check.
@@ -113,9 +137,14 @@ func (p *Prober) checkSteps() []CheckStep {
 		&deployedStep{},
 		&instanceTTLStep{},
 		&codeTTLStep{},
+		&wasmHashStep{},
 		&dataTTLStep{},
 		&simulateStep{},
 		&expectStep{p: p},
+		&standardStep{p: p},
+		&adminStep{p: p},
+		&upgradeabilityStep{p: p},
+		&rentPayerStep{p: p},
 	}
 }
 
@@ -140,11 +169,23 @@ func (s *expectStep) Run(_ context.Context, req CheckRequest, _ *InspectResult, 
 // inspect report and the simulation once and hands both to every step, so
 // adding a step cannot accidentally add an RPC call.
 func (p *Prober) Check(ctx context.Context, req CheckRequest) (*CheckResult, error) {
-	inspect, err := p.Inspect(ctx, InspectRequest{
+	if req.AdminFn != "" && req.AdminKey != "" {
+		return nil, errors.New("give an admin function or an admin key, not both")
+	}
+	if req.RentPayer != "" && req.ExtendLedgers == 0 {
+		req.ExtendLedgers = DefaultExtendLedgers
+	}
+	inspectReq := InspectRequest{
 		ContractID:     req.ContractID,
 		DataKeys:       req.DataKeys,
 		DataDurability: req.DataDurability,
-	})
+	}
+	// Pricing the extensions is the expensive part of an inspect, so it is
+	// asked for only when a rent payer is named.
+	if req.RentPayer != "" {
+		inspectReq.EstimateExtend = req.ExtendLedgers
+	}
+	inspect, err := p.Inspect(ctx, inspectReq)
 	if err != nil {
 		return nil, err
 	}

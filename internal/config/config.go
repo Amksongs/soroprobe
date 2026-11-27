@@ -94,6 +94,10 @@ const (
 	EnvHTTPTrustForwardedFor   = "HTTP_TRUST_FORWARDED_FOR"
 	EnvHTTPTLSCert             = "HTTP_TLS_CERT"
 	EnvHTTPTLSKey              = "HTTP_TLS_KEY"
+
+	// EnvSoroForgeToken names the variable that carries the token; the value
+	// is the variable's name, not a credential.
+	EnvSoroForgeToken = "SOROFORGE_API_TOKEN" //nolint:gosec // a variable name, not a secret.
 )
 
 // Config holds every setting SoroProbe needs.
@@ -132,6 +136,11 @@ type Config struct {
 	// SoroVaultURL, when set, is a SoroVault registry whose recorded contract
 	// interfaces type simulate arguments. Empty disables the lookup.
 	SoroVaultURL string `json:"sorovault_url"`
+	// SoroForgeToken authenticates the read-only SoroForge API call made by
+	// `check --from-soroforge`. It is a secret, so it is absent from the config
+	// file and comes from SOROFORGE_API_TOKEN or --soroforge-token. Empty means
+	// no token is available and the command refuses before sending a request.
+	SoroForgeToken string `json:"-"`
 	// InspectCacheTTL is how long `serve` may reuse an inspect result for the
 	// same contract and key set. Zero, the default, disables the cache; a few
 	// seconds suits dashboards, because TTLs change at most once per ledger.
@@ -191,6 +200,9 @@ type fileConfig struct {
 	// APIToken is accepted so that a file carrying the key still loads, and
 	// is never applied: the token is a secret and comes from API_TOKEN only.
 	APIToken *string `json:"api_token" yaml:"api_token"`
+	// SoroForgeToken is accepted for the same reason and, like APIToken, never
+	// applied from the file: SOROFORGE_API_TOKEN is the place a secret belongs.
+	SoroForgeToken *string `json:"soroforge_token" yaml:"soroforge_token"`
 }
 
 // defaultCandidateFiles lists config filenames checked in order when no path is specified.
@@ -215,6 +227,24 @@ func Load(path string) (Config, error) {
 // then the profile named by profileName (or SOROPROBE_PROFILE if empty),
 // then the environment.
 func LoadWithProfile(path string, profileName string) (Config, error) {
+	return load(path, profileName, true)
+}
+
+// LoadNetworkProfile builds the configuration for one named network profile.
+//
+// It behaves like LoadWithProfile except that RPC_URL and NETWORK_PASSPHRASE
+// are not read from the environment. Those two variables name exactly one
+// network, so letting them win would point every side of `compare` at the same
+// endpoint. Everything else (timeout, source account, thresholds, logging)
+// still comes from the environment as usual.
+func LoadNetworkProfile(path string, profileName string) (Config, error) {
+	if profileName == "" {
+		return Config{}, errors.New("a profile name is required to select a network")
+	}
+	return load(path, profileName, false)
+}
+
+func load(path string, profileName string, networkEnv bool) (Config, error) {
 	cfg := Default()
 
 	if profileName == "" {
@@ -238,7 +268,7 @@ func LoadWithProfile(path string, profileName string) (Config, error) {
 			if profileName != "" {
 				return cfg, fmt.Errorf("profile %q requested but no config file found", profileName)
 			}
-			if err := applyEnv(&cfg); err != nil {
+			if err := applyEnvWith(&cfg, networkEnv); err != nil {
 				return cfg, err
 			}
 			return cfg, nil
@@ -248,7 +278,7 @@ func LoadWithProfile(path string, profileName string) (Config, error) {
 	if err := applyFileWithProfile(&cfg, path, explicit, profileName); err != nil {
 		return cfg, err
 	}
-	if err := applyEnv(&cfg); err != nil {
+	if err := applyEnvWith(&cfg, networkEnv); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
@@ -365,9 +395,14 @@ func applyFileWithProfile(cfg *Config, path string, required bool, profileName s
 	return nil
 }
 
-func applyEnv(cfg *Config) error {
-	setString(&cfg.RPCURL, lookup(EnvRPCURL))
-	setString(&cfg.NetworkPassphrase, lookup(EnvNetworkPassphrase))
+// applyEnvWith applies environment settings. networkEnv controls the two
+// variables that name a single network, so a multi-network command can read
+// them from each profile instead.
+func applyEnvWith(cfg *Config, networkEnv bool) error {
+	if networkEnv {
+		setString(&cfg.RPCURL, lookup(EnvRPCURL))
+		setString(&cfg.NetworkPassphrase, lookup(EnvNetworkPassphrase))
+	}
 	setString(&cfg.SourceAccount, lookup(EnvSourceAccount))
 	setString(&cfg.HTTPAddr, lookup(EnvHTTPAddr))
 	if err := setUint32FromEnv(&cfg.HTTPRateLimitPerMinute, EnvHTTPRateLimitPerMinute); err != nil {
@@ -397,6 +432,7 @@ func applyEnv(cfg *Config) error {
 	setString(&cfg.LogFormat, lookup(EnvLogFormat))
 	setString(&cfg.SoroVaultURL, lookup(EnvSoroVaultURL))
 	setString(&cfg.APIToken, lookup(EnvAPIToken))
+	setString(&cfg.SoroForgeToken, lookup(EnvSoroForgeToken))
 
 	if v := lookup(EnvTimeout); v != nil {
 		d, err := time.ParseDuration(*v)

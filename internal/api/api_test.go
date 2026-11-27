@@ -444,6 +444,24 @@ func TestCheckEndpointFailingCheckIsStill200(t *testing.T) {
 	assert.False(t, result.OK)
 }
 
+func TestCheckEndpointStandard(t *testing.T) {
+	t.Parallel()
+
+	h := newServer(t, stellartest.NewFake(t))
+
+	var result probe.CheckResult
+	rec := do(t, h, http.MethodGet, "/v1/check/"+stellartest.SACContract+"?standard=sep41", "", &result)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	var names []string
+	for _, c := range result.Checks {
+		names = append(names, c.Name)
+	}
+	assert.Contains(t, names, "standard:sep41")
+
+	rec = do(t, h, http.MethodGet, "/v1/check/"+stellartest.SACContract+"?standard=erc20", "", nil)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestCheckEndpointPassesArgs(t *testing.T) {
 	t.Parallel()
 

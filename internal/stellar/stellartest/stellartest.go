@@ -12,7 +12,9 @@ package stellartest
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -354,4 +356,70 @@ func ArgsOf(envelope string) ([]xdr.ScVal, error) {
 		return nil, fmt.Errorf("host function is not invokeContract")
 	}
 	return args.Args, nil
+}
+
+// DeployWasm stores a Wasm-backed contract instance at contractID and a code
+// entry holding wasm, and returns the Wasm hash in hex. Both entries are live
+// for a long time, so a test sees healthy TTLs.
+func (f *Fake) DeployWasm(t testing.TB, contractID string, wasm []byte) string {
+	t.Helper()
+
+	contract, err := stellar.ParseContractID(contractID)
+	if err != nil {
+		t.Fatalf("parse contract id: %v", err)
+	}
+	hash := xdr.Hash(sha256.Sum256(wasm))
+	live := f.LatestLedger + 1_000_000
+
+	instance := xdr.ScContractInstance{
+		Executable: xdr.ContractExecutable{
+			Type:     xdr.ContractExecutableTypeContractExecutableWasm,
+			WasmHash: &hash,
+		},
+	}
+	f.store(t, stellar.InstanceKey(contract), xdr.LedgerEntryData{
+		Type: xdr.LedgerEntryTypeContractData,
+		ContractData: &xdr.ContractDataEntry{
+			Contract:   contract,
+			Key:        xdr.ScVal{Type: xdr.ScValTypeScvLedgerKeyContractInstance},
+			Durability: xdr.ContractDataDurabilityPersistent,
+			Val:        xdr.ScVal{Type: xdr.ScValTypeScvContractInstance, Instance: &instance},
+		},
+	}, live)
+	f.store(t, stellar.CodeKey(hash), xdr.LedgerEntryData{
+		Type:         xdr.LedgerEntryTypeContractCode,
+		ContractCode: &xdr.ContractCodeEntry{Hash: hash, Code: wasm},
+	}, live)
+	return hex.EncodeToString(hash[:])
+}
+
+func (f *Fake) store(t testing.TB, key xdr.LedgerKey, data xdr.LedgerEntryData, liveUntil uint32) {
+	t.Helper()
+	keyXDR, err := stellar.EncodeKey(key)
+	if err != nil {
+		t.Fatalf("encode key: %v", err)
+	}
+	dataXDR, err := xdr.MarshalBase64(data)
+	if err != nil {
+		t.Fatalf("encode entry: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Entries[keyXDR] = protocol.LedgerEntryResult{KeyXDR: keyXDR, DataXDR: dataXDR, LiveUntilLedgerSeq: &liveUntil}
+}
+
+// StoreEntry stores an arbitrary ledger entry, live for a long time, so a
+// test can stage state the recorded fixtures do not contain.
+func (f *Fake) StoreEntry(t testing.TB, key xdr.LedgerKey, data xdr.LedgerEntryData) {
+	t.Helper()
+	f.store(t, key, data, f.LatestLedger+1_000_000)
+}
+
+// StoreAccount stores an account entry, so tests can drive balance, signer
+// and threshold checks.
+func (f *Fake) StoreAccount(t testing.TB, acc xdr.AccountEntry) {
+	t.Helper()
+	f.StoreEntry(t,
+		xdr.LedgerKey{Type: xdr.LedgerEntryTypeAccount, Account: &xdr.LedgerKeyAccount{AccountId: acc.AccountId}},
+		xdr.LedgerEntryData{Type: xdr.LedgerEntryTypeAccount, Account: &acc})
 }

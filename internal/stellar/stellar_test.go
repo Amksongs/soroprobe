@@ -100,6 +100,25 @@ func TestDataKeyDurabilityChangesTheKey(t *testing.T) {
 	assert.NotEqual(t, persistent, temporary)
 }
 
+// benchmarkKey keeps the key built by BenchmarkDataKey observable, so the
+// compiler cannot optimize the call away.
+var benchmarkKey xdr.LedgerKey
+
+func BenchmarkDataKey(b *testing.B) {
+	addr, err := stellar.ParseContractID(testContract)
+	if err != nil {
+		b.Fatalf("parse contract id: %v", err)
+	}
+
+	sym := xdr.ScSymbol("Balance")
+	val := xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &sym}
+
+	b.ReportAllocs()
+	for b.Loop() {
+		benchmarkKey = stellar.DataKey(addr, val, xdr.ContractDataDurabilityPersistent)
+	}
+}
+
 func TestCodeKey(t *testing.T) {
 	t.Parallel()
 
@@ -114,6 +133,45 @@ func TestCodeKey(t *testing.T) {
 	encoded, err := stellar.EncodeKey(key)
 	require.NoError(t, err)
 	assert.NotEmpty(t, encoded)
+}
+
+func TestEncodeKeyEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	var maxHash xdr.Hash
+	for i := range maxHash {
+		maxHash[i] = 0xff
+	}
+
+	tests := []struct {
+		name    string
+		key     xdr.LedgerKey
+		wantErr bool
+	}{
+		{name: "empty ledger key", key: xdr.LedgerKey{}, wantErr: true},
+		{name: "unknown ledger entry type", key: xdr.LedgerKey{Type: xdr.LedgerEntryType(-1)}, wantErr: true},
+		{name: "maximum contract code hash", key: stellar.CodeKey(maxHash)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			encoded, err := stellar.EncodeKey(tt.key)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Empty(t, encoded)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.NotEmpty(t, encoded)
+
+			var decoded xdr.LedgerKey
+			require.NoError(t, xdr.SafeUnmarshalBase64(encoded, &decoded))
+			assert.Equal(t, tt.key, decoded)
+		})
+	}
 }
 
 func TestDecodeEntryDataFromFixture(t *testing.T) {
@@ -133,11 +191,28 @@ func TestDecodeEntryDataFromFixture(t *testing.T) {
 	require.NotNil(t, instance.Executable.WasmHash)
 }
 
-func TestDecodeEntryDataRejectsGarbage(t *testing.T) {
+func TestDecodeEntryDataRejectsInvalidInput(t *testing.T) {
 	t.Parallel()
 
-	_, err := stellar.DecodeEntryData("not base64 xdr!!")
-	require.Error(t, err)
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "empty input", input: ""},
+		{name: "malformed base64", input: "not base64 xdr!!"},
+		{name: "invalid entry type", input: "/////w=="},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			data, err := stellar.DecodeEntryData(tt.input)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "decode ledger entry data")
+			assert.Equal(t, xdr.LedgerEntryData{}, data)
+		})
+	}
 }
 
 func TestBuildInvocationTx(t *testing.T) {

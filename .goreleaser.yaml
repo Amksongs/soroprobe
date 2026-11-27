@@ -26,7 +26,15 @@ archives:
       - goos: windows
         formats: [zip]
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    files: [LICENSE, README.md]
+    files:
+      - LICENSE
+      - README.md
+      - docs/man/soroprobe.1
+
+sbom:
+  - artifacts: binary
+    format: spdx-json
+    name_template: "{{ .BinaryName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}.spdx.json"
 
 checksum:
   name_template: checksums.txt
@@ -35,10 +43,10 @@ changelog:
   sort: asc
   groups:
     - title: Features
-      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      regexp: '^.*?feat(\(.+\))?!!?:.+$'
       order: 0
     - title: Fixes
-      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      regexp: '^.*?fix(\(.+\))?!!?:.+$'
       order: 1
     - title: Other
       order: 999

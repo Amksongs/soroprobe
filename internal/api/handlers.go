@@ -202,6 +202,12 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := r.URL.Query()
+	if standard := query.Get("standard"); standard != "" {
+		if _, err := abi.LookupStandard(standard); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
 	result, err := s.prober.Check(r.Context(), probe.CheckRequest{
 		ContractID:     chi.URLParam(r, "contract"),
 		Function:       query.Get("fn"),
@@ -209,6 +215,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		Expect:         query.Get("expect"),
 		DataKeys:       query["key"],
 		DataDurability: durability,
+		Standard:       query.Get("standard"),
 	})
 	if err != nil {
 		writeError(w, statusForError(err), err)

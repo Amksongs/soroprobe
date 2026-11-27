@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -60,6 +61,86 @@ func TestReadyUnreachableOnGetNetwork(t *testing.T) {
 	err := p.Ready(context.Background(), testnetPassphrase)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, probe.ErrRPCUnreachable)
+}
+
+// stubClient answers getHealth and getNetwork with exactly the values a test
+// asks for, including the empty string. The fixture Fake treats an empty
+// override as "use the default answer", which would hide the empty-response
+// boundary these cases exist to pin down.
+type stubClient struct {
+	*stellartest.Fake
+	status     string
+	passphrase string
+}
+
+func (c stubClient) GetHealth(context.Context) (protocol.GetHealthResponse, error) {
+	c.HealthRequests++
+	return protocol.GetHealthResponse{Status: c.status, LatestLedger: c.LatestLedger}, nil
+}
+
+func (c stubClient) GetNetwork(context.Context) (protocol.GetNetworkResponse, error) {
+	c.NetworkRequests++
+	return protocol.GetNetworkResponse{Passphrase: c.passphrase}, nil
+}
+
+// TestReadyEmptyInputs covers the empty values Ready must reject rather than
+// treat as a match: an empty wanted passphrase, an empty health status, and an
+// endpoint that reports no passphrase at all. An empty string comparing equal
+// to an empty string is the boundary where a naive equality check would report
+// a misconfigured endpoint as ready.
+func TestReadyEmptyInputs(t *testing.T) {
+	tests := []struct {
+		name             string
+		wantPassphrase   string
+		healthStatus     string
+		servedPassphrase string
+		wantErr          error
+		wantNetworkCalls int
+	}{
+		{
+			name:             "empty wanted passphrase does not match a healthy endpoint",
+			wantPassphrase:   "",
+			healthStatus:     "healthy",
+			servedPassphrase: testnetPassphrase,
+			wantErr:          probe.ErrWrongNetwork,
+			wantNetworkCalls: 1,
+		},
+		{
+			name:             "empty health status is not healthy",
+			wantPassphrase:   testnetPassphrase,
+			healthStatus:     "",
+			servedPassphrase: testnetPassphrase,
+			wantErr:          probe.ErrRPCUnhealthy,
+			wantNetworkCalls: 0,
+		},
+		{
+			name:             "empty served passphrase does not match a configured network",
+			wantPassphrase:   testnetPassphrase,
+			healthStatus:     "healthy",
+			servedPassphrase: "",
+			wantErr:          probe.ErrWrongNetwork,
+			wantNetworkCalls: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := stellartest.NewFake(t)
+			client := stubClient{Fake: fake, status: tc.healthStatus, passphrase: tc.servedPassphrase}
+			p, err := probe.New(probe.Options{
+				Client:        client,
+				SourceAccount: stellartest.SourceAccount,
+				Thresholds:    health.Thresholds{},
+			})
+			require.NoError(t, err)
+
+			err = p.Ready(context.Background(), tc.wantPassphrase)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tc.wantErr)
+			assert.Equal(t, 1, fake.HealthRequests)
+			assert.Equal(t, tc.wantNetworkCalls, fake.NetworkRequests)
+		})
+	}
 }
 
 func TestReadyWrongNetwork(t *testing.T) {

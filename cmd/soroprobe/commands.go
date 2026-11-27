@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"go.yaml.in/yaml/v3"
 
+	"github.com/soroworks/soroprobe/internal/abi"
 	"github.com/soroworks/soroprobe/internal/api"
 	"github.com/soroworks/soroprobe/internal/config"
 	"github.com/soroworks/soroprobe/internal/health"
@@ -58,6 +59,9 @@ func newSimulateCmd(opts *options) *cobra.Command {
 	var maxIncrease string
 	var repeat int
 	var maxSpread string
+	var compareWith string
+	var trace bool
+	var envelope, envelopeFile string
 
 	cmd := &cobra.Command{
 		Use:   "simulate <contract-id> <function> [args...] | simulate --file <calls.json>",
@@ -87,8 +91,35 @@ the run is flagged as noisy and the command exits 1. When --baseline is also
 given, the comparison uses the maximum of the repeated runs, so a flaky
 estimate cannot make a cost check pass by luck.
 
+--compare <contract2> simulates the same call on a second contract and prints
+the footprint entries only one of them touches, entries that moved between
+read-only and read-write, and the change in each resource. Entries of the
+called contract itself line up as "self". With --json only the comparison is
+printed, sorted and stable for CI. "soroprobe diff" compares two saved reports.
+
+--trace prints the cross-contract call tree from the simulation's diagnostic
+events: each call's contract, function, arguments (named from the contract's
+interface where it can be read) and return value, with an error at the frame
+that raised it.
+
+--envelope (or --envelope-file, "-" for stdin) simulates a prebuilt base64
+transaction envelope exactly as a wallet or dApp built it, instead of
+building one. It must hold a single InvokeHostFunction operation.
+
 ` + argHelp,
 		Args: func(cmd *cobra.Command, args []string) error {
+			if envelope != "" || envelopeFile != "" {
+				if envelope != "" && envelopeFile != "" {
+					return fmt.Errorf("give --envelope or --envelope-file, not both")
+				}
+				if len(args) > 0 || file != "" {
+					return fmt.Errorf("an envelope already names its call, so give no contract, function or --file with it")
+				}
+				if baselinePath != "" || maxIncrease != "" || repeat > 1 || maxSpread != "" || compareWith != "" {
+					return fmt.Errorf("--envelope cannot be combined with --baseline, --max-increase, --repeat, --max-spread or --compare")
+				}
+				return nil
+			}
 			if file != "" {
 				if len(args) > 0 {
 					return fmt.Errorf("give a contract call or --file, not both")
@@ -119,6 +150,9 @@ estimate cannot make a cost check pass by luck.
 			if file != "" {
 				return runSimulateFile(cmd, opts, file, report)
 			}
+			if envelope != "" || envelopeFile != "" {
+				return runSimulateEnvelope(cmd, opts, envelope, envelopeFile, trace, report)
+			}
 
 			baseline, err := readBaseline(baselinePath)
 			if err != nil {
@@ -147,9 +181,29 @@ estimate cannot make a cost check pass by luck.
 				MaxIncreasePercent: threshold,
 				Repeat:             repeat,
 				MaxSpreadPercent:   spread,
+				Trace:              trace,
 			})
 			if err != nil {
 				return err
+			}
+
+			if compareWith != "" {
+				other, err := p.Simulate(cmd.Context(), probe.SimulateRequest{
+					ContractID: compareWith,
+					Function:   args[1],
+					Args:       args[2:],
+				})
+				if err != nil {
+					return err
+				}
+				diff, err := probe.CompareSimulations(args[0], result, compareWith, other)
+				if err != nil {
+					return err
+				}
+				if opts.jsonOut {
+					return writeJSON(cmd.OutOrStdout(), diff)
+				}
+				return renderDiff(cmd.OutOrStdout(), diff)
 			}
 
 			if err := report.write(result); err != nil {
@@ -188,6 +242,10 @@ estimate cannot make a cost check pass by luck.
 	cmd.Flags().StringVar(&maxIncrease, "max-increase", "", `fail when a cost figure grows by more than this percentage (e.g. "10%")`)
 	cmd.Flags().IntVar(&repeat, "repeat", 1, "simulate the call this many times and report the spread between runs")
 	cmd.Flags().StringVar(&maxSpread, "max-spread", "", `fail when the spread across repeated runs exceeds this percentage of the minimum (e.g. "5%")`)
+	cmd.Flags().StringVar(&compareWith, "compare", "", "simulate the same call on this second contract and compare footprints and resources")
+	cmd.Flags().BoolVar(&trace, "trace", false, "print the cross-contract call tree")
+	cmd.Flags().StringVar(&envelope, "envelope", "", "simulate this prebuilt base64 transaction envelope as given")
+	cmd.Flags().StringVar(&envelopeFile, "envelope-file", "", `read the envelope to simulate from a file ("-" for stdin)`)
 	return cmd
 }
 
@@ -373,6 +431,11 @@ func newCheckCmd(opts *options) *cobra.Command {
 	var reportPath string
 	var format string
 	var quiet bool
+	var standard string
+	var adminFn, adminKey, rentPayer string
+	var upgradeability bool
+	var extendLedgers uint32
+	var fromSoroForge, soroforgeToken, network string
 
 	cmd := &cobra.Command{
 		Use:   "check <contract-id> | check --file <checks.json>",
@@ -394,6 +457,30 @@ spec per line from a file, ignoring blank lines and lines starting with #, and
 combines them with --key. It applies to the single-contract form; --file
 entries carry their own data_keys.
 
+--standard verifies the contract's exported functions against a published
+interface; "sep41" is the token standard. The interface is read from the
+contract's Wasm on chain (or the configured SoroVault registry), each
+deviation fails its own check named standard:sep41:<function>, and the
+decimals, name and symbol functions are also simulated. Stellar Asset
+Contracts are skipped. It applies to the single-contract form; --file entries
+carry their own "standard".
+
+--admin-fn names a zero-argument function that returns the admin address, and
+--admin-key a storage key ("sym:Admin") that holds it. The admin's security
+posture is then reported: for an account its signers and thresholds, warning
+on a single key with master weight (marked MAINNET on the public network); for
+a contract, that it is a contract and its Wasm hash.
+
+--upgradeability reports, on a best-effort basis, whether the contract can be
+changed: upgrade-like functions in its interface (matched by name), the admin
+that would have to call them, and the ledger its code entry was last modified.
+
+--rent-payer names the account that pays to extend entries. The check prices
+extending every entry that is running low by --extend-ledgers (default 518400,
+about 30 days) and compares it with the payer's spendable balance after
+reserves, warning when it is thin and failing when it falls short. The
+calculation is printed. These three apply to the single-contract form.
+
 --file runs many checks at once, from a JSON file ("-" for stdin):
 
   {"checks": [
@@ -401,12 +488,22 @@ entries carry their own data_keys.
     {"name": "vault", "contract_id": "C...", "data_keys": ["sym:Admin"]}
   ]}
 
-Each entry takes name, contract_id, function, args, data_keys, data_durability
-and timeout — the same body POST /v1/checks accepts. timeout bounds a single
+Each entry takes name, contract_id, function, args, data_keys, data_durability,
+standard and timeout — the same body POST /v1/checks accepts. timeout bounds a single
 check, as a Go duration string ("45s"); a check that outlives it is reported as
 one that could not run, and the batch continues. --check-timeout supplies the
 default for entries that name none. With --file, the exit code is 2 if any
 check could not run, else 1 if any failed, else 0.
+
+--from-soroforge reads the contracts a SoroForge registry tracks and checks each
+one, instead of a hand-written check file that drifts out of date. It fetches
+GET /v1/contracts (following pagination) with a read-only bearer token from
+SOROFORGE_API_TOKEN or --soroforge-token, and compares the Wasm hash SoroForge
+recorded with the live one: a mismatch fails the check named wasm_hash and
+reports both hashes. --network selects the SoroForge network label (it defaults
+to the label for the configured passphrase); the RPC endpoint must serve that
+same network. An empty list, an authentication failure or a pagination error is
+exit 2, because no check ran.
 
 --report writes the JSON result to a file while the text report still goes to
 the terminal, so a CI run can keep readable logs and a machine-readable
@@ -421,6 +518,18 @@ Inside GitHub Actions (GITHUB_ACTIONS is set) each failed or warned step also
 prints an ::error:: or ::warning:: line, which surfaces on the run summary
 instead of hiding in the log. --json and --quiet suppress them.`,
 		Args: func(cmd *cobra.Command, args []string) error {
+			if fromSoroForge != "" {
+				if len(args) > 0 {
+					return fmt.Errorf("give --from-soroforge or a contract ID, not both")
+				}
+				if file != "" {
+					return fmt.Errorf("give --from-soroforge or --file, not both")
+				}
+				return nil
+			}
+			if network != "" {
+				return fmt.Errorf("--network selects a SoroForge network; give it with --from-soroforge")
+			}
 			if file != "" {
 				if len(args) > 0 {
 					return fmt.Errorf("give a contract ID or --file, not both")
@@ -436,6 +545,26 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 			if err := checkQuietConflicts(quiet, opts.jsonOut, reportPath); err != nil {
 				return err
 			}
+			if standard != "" {
+				if file != "" {
+					return fmt.Errorf("give --standard with a contract ID, not with --file; --file entries take a \"standard\" field")
+				}
+				// Validated before any request is sent, so a typo costs nothing.
+				if _, err := abi.LookupStandard(standard); err != nil {
+					return err
+				}
+			}
+			if adminFn != "" && adminKey != "" {
+				return fmt.Errorf("give --admin-fn or --admin-key, not both")
+			}
+			if file != "" && (adminFn != "" || adminKey != "" || upgradeability || rentPayer != "") {
+				return fmt.Errorf("--admin-fn, --admin-key, --upgradeability and --rent-payer apply to a single contract, not --file")
+			}
+			if fromSoroForge != "" && (function != "" || len(callArgs) > 0 || expect != "" || standard != "" ||
+				keyFile != "" || len(dataKeys) > 0 || cmd.Flags().Changed("durability") ||
+				adminFn != "" || adminKey != "" || upgradeability || rentPayer != "") {
+				return fmt.Errorf("--fn, --arg, --expect, --key, --key-file, --durability, --standard, --admin-fn, --admin-key, --upgradeability and --rent-payer apply to a single contract, not --from-soroforge")
+			}
 			outputFormat, err := selectOutputFormat(cmd, opts, format)
 			if err != nil {
 				return err
@@ -446,6 +575,10 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 				return err
 			}
 			defer func() { err = errors.Join(err, report.close()) }()
+
+			if fromSoroForge != "" {
+				return runFromSoroForge(cmd, opts, fromSoroForge, soroforgeToken, network, checkTimeout, concurrency, report, quiet, outputFormat)
+			}
 
 			if file != "" {
 				return runCheckFile(cmd, opts, file, checkTimeout, concurrency, report, quiet, outputFormat)
@@ -474,6 +607,12 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 				Expect:         expect,
 				DataKeys:       keys,
 				DataDurability: d,
+				Standard:       standard,
+				AdminFn:        adminFn,
+				AdminKey:       adminKey,
+				Upgradeability: upgradeability,
+				RentPayer:      rentPayer,
+				ExtendLedgers:  extendLedgers,
 			})
 			if err != nil {
 				return err
@@ -498,15 +637,28 @@ instead of hiding in the log. --json and --quiet suppress them.`,
 
 	cmd.Flags().StringVar(&function, "fn", "", "read-only function to simulate as a liveness probe")
 	cmd.Flags().StringArrayVar(&callArgs, "arg", nil, "argument for --fn, in type:value form (repeatable)")
+	cmd.Flags().StringVar(&standard, "standard", "",
+		fmt.Sprintf("verify the contract's interface against a standard (%s)", strings.Join(abi.StandardNames(), ", ")))
+	cmd.Flags().StringVar(&adminFn, "admin-fn", "", "zero-argument function returning the admin address; reports the admin's security posture")
+	cmd.Flags().StringVar(&adminKey, "admin-key", "", `storage key holding the admin address, as type:value (e.g. "sym:Admin")`)
+	cmd.Flags().BoolVar(&upgradeability, "upgradeability", false, "report whether the contract can be upgraded (best effort)")
+	cmd.Flags().StringVar(&rentPayer, "rent-payer", "", "account that pays rent; checks it can afford to extend the entries running low")
+	cmd.Flags().Uint32Var(&extendLedgers, "extend-ledgers", 0, fmt.Sprintf("ledgers to price the --rent-payer extension for (default %d)", probe.DefaultExtendLedgers))
 	cmd.Flags().StringVar(&expect, "expect", "", "expected return value specification for --fn, in type:value form")
 	cmd.Flags().StringArrayVar(&dataKeys, "key", nil, "a contract data key to include in the TTL check (repeatable)")
 	cmd.Flags().StringVar(&keyFile, "key-file", "", "a file listing data keys for the TTL check, one spec per line (blank lines and # comments ignored)")
 	cmd.Flags().StringVar(&durability, "durability", "persistent", "durability for --key lookups: persistent or temporary")
 	cmd.Flags().StringVarP(&file, "file", "f", "", `run every check listed in this JSON file ("-" for stdin)`)
+	cmd.Flags().StringVar(&fromSoroForge, "from-soroforge", "",
+		"fetch the contracts a SoroForge API tracks and check each (URL, e.g. http://localhost:8080)")
+	cmd.Flags().StringVar(&soroforgeToken, "soroforge-token", "",
+		fmt.Sprintf("read-only SoroForge API token (env %s)", config.EnvSoroForgeToken))
+	cmd.Flags().StringVar(&network, "network", "",
+		"SoroForge network label to read with --from-soroforge (default: derived from the network passphrase)")
 	cmd.Flags().DurationVar(&checkTimeout, "check-timeout", 0,
-		`default time limit for each check in --file; a per-entry "timeout" wins (0 means no limit)`)
+		`default time limit for each check in --file or --from-soroforge; a per-entry "timeout" wins (0 means no limit)`)
 	cmd.Flags().StringVar(&format, "format", "text", "output format: text, json or markdown")
-	cmd.Flags().IntVar(&concurrency, "concurrency", 1, "maximum number of --file checks to run at once")
+	cmd.Flags().IntVar(&concurrency, "concurrency", 1, "maximum number of --file or --from-soroforge checks to run at once")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
 		"print no report; the exit code is the whole answer (errors still reach stderr)")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write the JSON result to this file while printing text as usual")
@@ -533,7 +685,12 @@ func runCheckFile(cmd *cobra.Command, opts *options, path string, checkTimeout t
 	}
 	applyDefaultTimeout(&req, checkTimeout)
 	req.Concurrency = concurrency
+	return runCheckBatch(cmd, opts, req, report, quiet, format)
+}
 
+// runCheckBatch runs an assembled batch and renders it exactly as --file does,
+// so a batch from a file and one read from SoroForge cannot report differently.
+func runCheckBatch(cmd *cobra.Command, opts *options, req probe.BatchRequest, report *reportFile, quiet bool, format string) error {
 	p, cleanup, err := opts.prober()
 	if err != nil {
 		return err
@@ -833,4 +990,38 @@ func parseDurability(s string) (health.Durability, error) {
 	default:
 		return "", fmt.Errorf("unknown durability %q (want persistent or temporary)", s)
 	}
+}
+
+// runSimulateEnvelope simulates a prebuilt envelope as given.
+func runSimulateEnvelope(cmd *cobra.Command, opts *options, envelope, envelopeFile string, trace bool, report *reportFile) error {
+	if envelopeFile != "" {
+		var raw []byte
+		var err error
+		if envelopeFile == "-" {
+			raw, err = io.ReadAll(cmd.InOrStdin())
+		} else {
+			raw, err = os.ReadFile(envelopeFile) //nolint:gosec // the operator names the envelope file; reading it is the feature.
+		}
+		if err != nil {
+			return fmt.Errorf("read envelope: %w", err)
+		}
+		envelope = string(raw)
+	}
+	p, cleanup, err := opts.prober()
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	result, err := p.SimulateEnvelope(cmd.Context(), probe.EnvelopeRequest{EnvelopeXDR: envelope, Trace: trace})
+	if err != nil {
+		return err
+	}
+	if err := report.write(result); err != nil {
+		return err
+	}
+	if opts.jsonOut {
+		return writeJSON(cmd.OutOrStdout(), result)
+	}
+	return renderSimulate(cmd.OutOrStdout(), result)
 }

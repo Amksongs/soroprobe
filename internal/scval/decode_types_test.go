@@ -30,6 +30,8 @@ func TestDecodeSupportedTypes(t *testing.T) {
 	}
 	vector := xdr.ScVec{encode("i32:-7")}
 	vectorPointer := &vector
+	emptyVector := xdr.ScVec{}
+	emptyVectorPointer := &emptyVector
 	mapEntries := xdr.ScMap{{Key: encode("sym:key"), Val: encode("str:value")}}
 	mapPointer := &mapEntries
 
@@ -40,6 +42,7 @@ func TestDecodeSupportedTypes(t *testing.T) {
 	}{
 		{name: "bool", value: encode("bool:true"), want: true},
 		{name: "void", value: encode("void"), want: nil},
+		{name: "u32 zero", value: encode("u32:0"), want: uint32(0)},
 		{name: "u32", value: encode("u32:4294967295"), want: uint32(4294967295)},
 		{name: "i32", value: encode("i32:-2147483648"), want: int32(-2147483648)},
 		{name: "u64", value: encode("u64:18446744073709551615"), want: "18446744073709551615"},
@@ -51,9 +54,11 @@ func TestDecodeSupportedTypes(t *testing.T) {
 		{name: "u256", value: encode("u256:115792089237316195423570985008687907853269984665640564039457584007913129639935"), want: "115792089237316195423570985008687907853269984665640564039457584007913129639935"},
 		{name: "i256", value: encode("i256:-57896044618658097711785492504343953926634992332820282019728792003956564819968"), want: "-57896044618658097711785492504343953926634992332820282019728792003956564819968"},
 		{name: "bytes", value: encode("bytes:deadbeef"), want: "deadbeef"},
+		{name: "bytes empty", value: encode("bytes:"), want: ""},
 		{name: "string", value: encode("str:hello"), want: "hello"},
 		{name: "symbol", value: encode("sym:transfer"), want: "transfer"},
 		{name: "vector", value: xdr.ScVal{Type: xdr.ScValTypeScvVec, Vec: &vectorPointer}, want: []any{int32(-7)}},
+		{name: "empty vector", value: xdr.ScVal{Type: xdr.ScValTypeScvVec, Vec: &emptyVectorPointer}, want: []any{}},
 		{name: "map", value: xdr.ScVal{Type: xdr.ScValTypeScvMap, Map: &mapPointer}, want: map[string]any{"key": "value"}},
 		{name: "account address", value: encode("addr:" + accountAddress), want: accountAddress},
 		{name: "contract address", value: encode("addr:" + contractAddress), want: contractAddress},

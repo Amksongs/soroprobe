@@ -69,6 +69,87 @@ func TestDefaultHTTPAddrIsLoopback(t *testing.T) {
 	assert.NoError(t, cfg.Validate())
 }
 
+func TestDefaultEdgeCases(t *testing.T) {
+	// Boundary and invalid-input cases applied on top of Default(), which has
+	// to sit exactly on the edge of what Validate accepts for them to mean
+	// anything.
+	tests := []struct {
+		name    string
+		mutate  func(*config.Config)
+		wantErr string // empty means the config must stay valid
+	}{
+		{
+			name:   "empty optional fields are valid",
+			mutate: func(c *config.Config) { c.APIToken, c.SoroVaultURL, c.HTTPTLSCert, c.HTTPTLSKey = "", "", "", "" },
+		},
+		{
+			name:   "api token exactly at the minimum length",
+			mutate: func(c *config.Config) { c.APIToken = strings.Repeat("a", config.MinAPITokenLength) },
+		},
+		{
+			name:    "api token one character below the minimum",
+			mutate:  func(c *config.Config) { c.APIToken = strings.Repeat("a", config.MinAPITokenLength-1) },
+			wantErr: "api token",
+		},
+		{
+			name:    "empty rpc url",
+			mutate:  func(c *config.Config) { c.RPCURL = "" },
+			wantErr: "rpc url is required",
+		},
+		{
+			name:    "zero timeout",
+			mutate:  func(c *config.Config) { c.Timeout = 0 },
+			wantErr: "timeout must be positive",
+		},
+		{
+			name:    "critical threshold one above warn",
+			mutate:  func(c *config.Config) { c.CriticalLedgers = c.WarnLedgers + 1 },
+			wantErr: "must not exceed warning threshold",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Default()
+			tt.mutate(&cfg)
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestDefaultLeavesOptionalSettingsUnset(t *testing.T) {
+	// Secrets and opt-in features must be off by default: an empty value is
+	// the "disabled" signal, so a stray non-zero default would enable them.
+	cfg := config.Default()
+
+	assert.Empty(t, cfg.APIToken)
+	assert.Empty(t, cfg.SoroVaultURL)
+	assert.Empty(t, cfg.HTTPTLSCert)
+	assert.Empty(t, cfg.HTTPTLSKey)
+	assert.Nil(t, cfg.CORSOrigins)
+	assert.False(t, cfg.HTTPTrustForwardedFor)
+	assert.Zero(t, cfg.InspectCacheTTL)
+	assert.Equal(t, config.Config{}.ThresholdOverrides, cfg.ThresholdOverrides)
+}
+
+func TestDefaultReturnsIndependentValues(t *testing.T) {
+	// Mutating one result must not leak into the next call.
+	first := config.Default()
+	first.RPCURL = "https://mutated.example.com"
+	first.CORSOrigins = append(first.CORSOrigins, "https://evil.example.com")
+
+	second := config.Default()
+	assert.Equal(t, config.DefaultRPCURL, second.RPCURL)
+	assert.Nil(t, second.CORSOrigins)
+}
+
 func TestLoadWithNoFileOrEnvGivesDefaults(t *testing.T) {
 	// An absent ./soroprobe.json is not an error; an explicitly named one is.
 	t.Chdir(t.TempDir())
@@ -519,6 +600,13 @@ func TestParseLogLevel(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func BenchmarkParseLogLevel(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = config.ParseLogLevel("debug")
+	}
+}
+
 func TestLoadInspectCacheTTL(t *testing.T) {
 	path := writeConfig(t, `{"inspect_cache_ttl":"5s"}`)
 
@@ -580,6 +668,13 @@ func TestParseLogFormat(t *testing.T) {
 	assert.Contains(t, err.Error(), "json")
 }
 
+func BenchmarkParseLogFormat(b *testing.B) {
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = config.ParseLogFormat("json")
+	}
+}
+
 func TestLoggerJSONEmitsParseableLines(t *testing.T) {
 	// The point of JSON mode is that a CI log aggregator can filter on
 	// fields — contract, status — instead of regex-parsing the text handler's
@@ -634,4 +729,48 @@ func TestLoggerHonoursLogLevel(t *testing.T) {
 
 	assert.NotContains(t, buf.String(), "suppressed")
 	assert.Contains(t, buf.String(), "kept")
+}
+
+func TestConfigMarshalsAndUnmarshals(t *testing.T) {
+	t.Parallel()
+
+	// Every serialized field carries a distinct non-zero value, so a wrong tag
+	// or type cannot hide behind a zero. CORSOrigins, APIToken and
+	// SoroForgeToken are json:"-" by design — they are secrets or
+	// environment-only settings — so they stay unset and take no part in the
+	// comparison.
+	warn := uint32(700)
+	critical := uint32(70)
+	original := config.Config{
+		RPCURL:                 "https://rpc.example.org",
+		NetworkPassphrase:      "Example Network ; 2026",
+		SourceAccount:          config.DefaultSourceAccount,
+		HTTPAddr:               "127.0.0.1:9090",
+		HTTPRateLimitPerMinute: 120,
+		HTTPRateLimitBurst:     20,
+		HTTPTrustForwardedFor:  true,
+		HTTPTLSCert:            "/etc/soroprobe/cert.pem",
+		HTTPTLSKey:             "/etc/soroprobe/key.pem",
+		LogLevel:               "debug",
+		LogFormat:              "json",
+		Timeout:                45 * time.Second,
+		WarnLedgers:            1_000,
+		CriticalLedgers:        100,
+		ThresholdOverrides: health.ThresholdOverrides{
+			Instance: &health.ThresholdOverride{Warn: &warn},
+			Code:     &health.ThresholdOverride{Critical: &critical},
+			Data:     &health.ThresholdOverride{Warn: &warn, Critical: &critical},
+		},
+		SoroVaultURL:    "http://sorovault.example.org",
+		InspectCacheTTL: 4 * time.Second,
+		BaseFee:         200,
+	}
+
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+
+	var decoded config.Config
+	require.NoError(t, json.Unmarshal(data, &decoded))
+
+	assert.Equal(t, original, decoded)
 }

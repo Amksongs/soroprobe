@@ -54,11 +54,15 @@ tidy: ## Tidy go.mod and go.sum
 	$(GO) mod tidy
 
 .PHONY: check
-check: fmt vet test ## Format, vet and test — run before opening a PR
+check: fmt vet test man ## Format, vet, test, and regenerate man pages
 
 .PHONY: fixtures
 fixtures: ## Re-record test fixtures from the live testnet
 	$(GO) run ./internal/stellar/stellartest/record $(FIXTURE_FLAGS)
+
+.PHONY: man
+man: ## Generate man pages from the CLI help text
+	$(GO) run ./cmd/soroprobe/gen-man
 
 .PHONY: run
 run: ## Run the HTTP API locally

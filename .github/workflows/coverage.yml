@@ -1,0 +1,92 @@
+name: Coverage gate
+
+# Run on the same events CI does, plus a manual dispatch so reviewers can
+# re-run the coverage job without re-running the rest of CI.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# The coverage job only needs the repository for checkout and reads the code
+# to run the tests. On pull requests it also writes the job summary, which does
+# not require extra permissions.
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version: "1.26"
+          cache: true
+          check-latest: true
+
+      # Coverage figure excludes the fixture recorder and test helpers, which are
+      # not part of the library or CLI surface. That matches the "done" criterion
+      # for #42: the fixture recorder (stellartest/record) and test helpers are
+      # left out of the number.
+      - name: Test with coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          go test \
+            -coverprofile=coverage.txt \
+            -covermode=atomic \
+            ./cmd/... ./internal/...
+          total=$(go tool cover -func=coverage.txt | awk '/^total:/ { print $3 }')
+          echo "TOTAL_COVERAGE=$total" >> "$GITHUB_ENV"
+          {
+            echo "## Coverage report"
+            echo '```'
+            go tool cover -func=coverage.txt
+            echo '```'
+            echo ""
+            echo "Total coverage: **$total**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Compare against main only on pull requests, so a PR cannot drop coverage
+      # unnoticed. The failure threshold is documented in the PR body: coverage
+      # must not fall by more than 1 percentage point compared with main.
+      - name: Compare with main
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -o pipefail
+          base_branch="${{ github.base_ref }}"
+          git fetch origin "$base_branch"
+          go test \
+            -coverprofile=base-coverage.txt \
+            -covermode=atomic \
+            ./cmd/... ./internal/...
+          base=$(go tool cover -func=base-coverage.txt | awk '/^total:/ { print $3 }')
+          echo "BASE_COVERAGE=$base" >> "$GITHUB_ENV"
+          drop=$(awk -v current="$TOTAL_COVERAGE" -v base="$base" 'BEGIN { printf "%.4f", base - current }')
+          {
+            echo ""
+            echo "| Coverage | Value |"
+            echo "| — | — |"
+            echo "| base (main) | $base |"
+            echo "| this PR | $TOTAL_COVERAGE |"
+            echo "| drop | $drop |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          threshold=1.0
+          if awk -v drop="$drop" -v t="$threshold" 'BEGIN { exit !(drop > t) }'; then
+            {
+              echo ""
+              echo "⚠️ Coverage dropped by **$drop** from **$base** to **$TOTAL_COVERAGE**," >> "$GITHUB_STEP_SUMMARY"
+              echo "which is more than the **$threshold**-point threshold." >> "$GITHUB_STEP_SUMMARY"
+              echo "Coverage gate failed." >> "$GITHUB_STEP_SUMMARY"
+            }
+            exit 1
+          fi
+          {
+            echo ""
+            echo "Coverage change **$drop** is within the **$threshold**-point threshold." >> "$GITHUB_STEP_SUMMARY"
+          }

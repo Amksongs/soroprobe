@@ -674,3 +674,29 @@ func TestCheckFileRunsEndToEndAgainstTheFake(t *testing.T) {
 		assert.Contains(t, err.Error(), "read check file")
 	})
 }
+
+func TestCheckStandardIsValidatedBeforeAnyRequest(t *testing.T) {
+	err := runWith(t, "check", "--standard", "erc20", stellartest.SACContract)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "erc20")
+	assert.Contains(t, err.Error(), "sep41")
+
+	err = runWith(t, "check", "--standard", "sep41", "--file", "checks.json")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--file")
+}
+
+func TestCheckStandardSkipsAStellarAssetContract(t *testing.T) {
+	out, err := runWithFake(t, stellartest.NewFake(t), "check", "--standard", "sep41", stellartest.SACContract)
+	require.NoError(t, err)
+	assert.Contains(t, out, "standard:sep41")
+	assert.Contains(t, out, "SKIP")
+}
+
+func TestCheckStandardFailureExitsOne(t *testing.T) {
+	// The recorded Wasm contract is not a token.
+	out, err := runWithFake(t, stellartest.NewFake(t), "check", "--standard", "sep41", stellartest.WasmContract)
+	assertExitCodeOne(t, err)
+	assert.Contains(t, out, "standard:sep41:")
+	assert.Contains(t, out, "FAIL")
+}
